@@ -97,8 +97,18 @@ BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS :=
 # 设备实测 ro.treble.enabled=true，且存在独立 vendor 分区
 PRODUCT_FULL_TREBLE_OVERRIDE := true
 BOARD_VNDK_VERSION           := current
-# 原厂 vendor 为 Android 8.1（VNDK 27），额外产出低版本 VNDK 兼容库
-PRODUCT_EXTRA_VNDK_VERSIONS  := 27 28 29
+# ⚠️ 这里绝对不能写 PRODUCT_EXTRA_VNDK_VERSIONS！
+#    它是【产品级只读变量】，只能写在产品配置文件（device.mk / lineage_MS600.mk）里。
+#    写在这里会直接报错：
+#      BoardConfig.mk:101: error: cannot assign to readonly variable: PRODUCT_EXTRA_VNDK_VERSIONS
+#      → dumpvars failed → lunch 失败 → 编译一行都没跑
+#    （2026-09-30 第一次云编译就是死在这一行）
+#
+# 【遗留问题，后续轮次再处理】
+#   原厂 vendor 是 Android 8.1（VNDK 27），理论上需要额外产出低版本 VNDK 兼容库，
+#   但 AOSP 11 的 prebuilts/vndk/ 里只有 v28/v29，**没有 v27**，
+#   所以直接把 27 填进去大概率还是会报「不支持的 VNDK 版本」。
+#   正确解法留待第二轮评估（可选方向：BOARD_VNDK_VERSION 降级 / 从原厂 vendor 提取 v27 库）。
 
 # ---------------------------- Recovery ------------------------------------
 TARGET_RECOVERY_FSTAB    := device/iflytek/MS600/recovery.fstab
