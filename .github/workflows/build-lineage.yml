@@ -41,8 +41,10 @@ on:
     branches: [ main, master ]
 
 concurrency:
+  # 同一分支只保留最新一次运行；新运行会自动顶掉排队中/执行中的旧运行。
+  # （逐文件推送会触发多次运行，靠这个开关自动收敛，无需手工取消）
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
