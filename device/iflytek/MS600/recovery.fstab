@@ -1,0 +1,40 @@
+#
+# recovery.fstab — 讯飞 MS600 (iFlytek MeetingService600)
+#
+# ★ 关键修正（本机实测）：
+#   TWRP 版 fstab 里写的 /dev/block/bootdevice/by-name/ 这个软链
+#   在 recovery 环境下 *不存在*，导致 TWRP 无法挂载任何分区。
+#   设备真实路径为： /dev/block/platform/soc/7824900.sdhci/by-name/
+#   本文件直接使用真实路径，避免再次踩坑。
+#
+# 格式： <src>  <mnt_point>  <type>  <mnt_flags>  <fs_mgr_flags>
+#
+
+# /system  （recovery 不挂载，仅作记录；system-as-root 设备由 first-stage init 处理）
+/dev/block/platform/soc/7824900.sdhci/by-name/system    /system    ext4    ro,barrier=1    wait
+
+# /vendor
+/dev/block/platform/soc/7824900.sdhci/by-name/vendor    /vendor    ext4    ro,barrier=1    wait
+
+# /cache
+/dev/block/platform/soc/7824900.sdhci/by-name/cache     /cache     ext4    noatime,nosuid,nodev,barrier=1    wait
+
+# /data  —— 设备使用 文件级加密(FBE)，无独立 metadata 分区
+/dev/block/platform/soc/7824900.sdhci/by-name/userdata  /data      ext4    noatime,nosuid,nodev,barrier=1,data=ordered,noauto_da_alloc    wait,check,fileencryption=ice
+
+# /persist
+/dev/block/platform/soc/7824900.sdhci/by-name/persist   /persist   ext4    noatime,nosuid,nodev,barrier=1    wait,check
+
+# /oem
+/dev/block/platform/soc/7824900.sdhci/by-name/oem       /oem       ext4    ro,barrier=1    wait
+
+# 以下为裸分区（raw / emmc），recovery 以镜像方式读写，不做文件系统挂载
+/dev/block/platform/soc/7824900.sdhci/by-name/boot      /boot      emmc    defaults    defaults
+/dev/block/platform/soc/7824900.sdhci/by-name/recovery  /recovery  emmc    defaults    defaults
+/dev/block/platform/soc/7824900.sdhci/by-name/misc      /misc      emmc    defaults    defaults
+/dev/block/platform/soc/7824900.sdhci/by-name/modem     /modem     emmc    defaults    defaults
+/dev/block/platform/soc/7824900.sdhci/by-name/devinfo   /devinfo   emmc    defaults    defaults
+
+# 外置存储
+/dev/block/mmcblk1p1    /sdcard    vfat    defaults    defaults
+/dev/block/sda1         /usb-otg   auto    defaults    defaults
