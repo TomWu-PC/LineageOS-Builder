@@ -17,7 +17,13 @@ TARGET_CPU_ABI2         :=
 TARGET_CPU_VARIANT      := cortex-a53
 
 TARGET_2ND_ARCH         := arm
-TARGET_2ND_ARCH_VARIANT := armv7-a-neon
+# ⚠️ 必须是 armv8-a，不能写 armv7-a-neon！
+#    Android 10+ 的 build/make/core/combo/TARGET_linux-arm.mk:53 强制要求：
+#    64 位设备上的 32 位第二架构，CPU 实际是 ARMv8，写 armv7-a-neon 会直接报
+#      error: Incorrect TARGET_2ND_ARCH_VARIANT, armv7-a-neon. Use armv8-a instead..
+#    → dumpvars 失败 → lunch 失败 → 编译一行都没跑（2026-09-30 第二次云编译死因）
+#    注意：Android 8.1 时代的 msm8953 设备树写的是 armv7-a-neon，不可照搬！
+TARGET_2ND_ARCH_VARIANT := armv8-a
 TARGET_2ND_CPU_ABI      := armeabi-v7a
 TARGET_2ND_CPU_ABI2     := armeabi
 TARGET_2ND_CPU_VARIANT  := cortex-a53
