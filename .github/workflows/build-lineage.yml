@@ -134,7 +134,7 @@ jobs:
                     --no-clone-bundle
 
       # -----------------------------------------------------------------
-      - name: ⑧ 同步源码（★ 最耗时，40~90 分钟）
+      - name: ⑧ 同步源码（★ 最耗时，实测约 11 分钟）
         run: |
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
@@ -177,8 +177,15 @@ jobs:
           source build/envsetup.sh
           echo "===== 可用 lunch 目标 ====="
           lunch 2>&1 | tail -30 || true
-          echo "===== 选择 lineage_MS600-eng ====="
-          lunch lineage_MS600-eng
+          # ⚠️ 必须用 userdebug，不能用 eng！
+          #    eng 变体会让 build 系统往 cmdline 末尾追加 `buildvariant=eng`，
+          #    覆盖掉 DTB / BoardConfig 里的 `buildvariant=user`
+          #    （实测 2026-09-30 第二轮 boot.img 的 cmdline：
+          #       ... buildvariant=user buildvariant=eng   ← 末尾是 eng，错的）
+          #    后果：ro.build.type=eng、adb 默认 root、性能偏慢，不符合真实产品形态。
+          #    userdebug = 可调试 + 性能正常；user = 正式版（但无法 adb root 调试）。
+          echo "===== 选择 lineage_MS600-userdebug ====="
+          lunch lineage_MS600-userdebug
           # ⚠️ push 事件触发时 github.event.inputs.* 为空 → 必须给默认值兜底，
           #    否则会变成 `mka  -j`（无目标 = 编整个 ROM，烧光 6 小时额度）
           BUILD_TARGET="${{ github.event.inputs.build_target || 'recoveryimage' }}"
