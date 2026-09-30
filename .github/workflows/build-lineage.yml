@@ -1,0 +1,213 @@
+name: Build LineageOS 18.1 for MS600
+
+# =============================================================================
+#  讯飞听见 L1（MS600）LineageOS 18.1（Android 11）云编译
+#
+#  设备事实（全部本机实测）：
+#    平台 msm8953 / SDM450 · 内核 3.18.71-perf（prebuilt）· A-only
+#    system 3GB / vendor 1GB / boot 64MB / recovery 64MB
+#    bootloader 已解锁（verifiedbootstate=orange）
+#
+#  与 TWRP 工程的关键差异（不要照搬 TWRP 的 workflow）：
+#    ✗ 不要装 python2.7 —— Android 11 的构建脚本是 Python 3
+#    ✗ 不要装 python-is-python3 之外的 python 覆盖
+#    ✓ JDK 必须 11（Android 11 要求），不是 JDK 8
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: '编译目标（recoveryimage / bootimage / systemimage / bacon）'
+        required: true
+        default: 'recoveryimage'
+        type: choice
+        options:
+          - recoveryimage
+          - bootimage
+          - systemimage
+          - bacon
+      jobs:
+        description: '并行编译任务数（内存吃紧就调小）'
+        required: true
+        default: '4'
+        type: string
+      sync_only:
+        description: '只同步源码不编译（验证 sync 可行性）'
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: LineageOS 18.1 / MS600
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+
+    steps:
+      # -----------------------------------------------------------------
+      - name: ① 检出本工程
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      - name: ② 探测 Runner 规格（决定后续并行度）
+        run: |
+          echo "================ CPU ================"
+          nproc
+          lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core' || true
+          echo "================ 内存 ================"
+          free -h
+          echo "================ 磁盘（清理前）================"
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ③ 释放磁盘空间
+        run: |
+          echo "清理前："; df -h /
+          sudo rm -rf /usr/share/dotnet                || true
+          sudo rm -rf /usr/local/lib/android           || true
+          sudo rm -rf /opt/ghc                         || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL      || true
+          sudo rm -rf /usr/local/share/boost           || true
+          sudo rm -rf /usr/local/share/powershell      || true
+          sudo rm -rf /usr/share/swift                 || true
+          sudo rm -rf /usr/local/.ghcup                || true
+          sudo rm -rf /usr/local/lib/node_modules      || true
+          sudo apt-get clean
+          sudo docker image prune -a -f                || true
+          echo "清理后："; df -h /
+
+      # -----------------------------------------------------------------
+      - name: ④ 安装 JDK 11（Android 11 必需）
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      # -----------------------------------------------------------------
+      - name: ⑤ 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          PKGS="bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+                git gnupg gperf imagemagick lib32readline-dev lib32z1-dev libelf-dev \
+                liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop \
+                pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+                libncurses5-dev libncurses5 lib32ncurses5-dev"
+          if ! sudo apt-get install -y $PKGS; then
+            echo "::warning::整批安装失败，改为逐个安装（个别包在 22.04 已改名，可忽略）"
+            for p in $PKGS; do
+              sudo apt-get install -y "$p" || echo "::warning::跳过缺失包: $p"
+            done
+          fi
+
+      # -----------------------------------------------------------------
+      - name: ⑥ 配置 git 与 repo 工具
+        run: |
+          git config --global user.name  "MS600 Builder"
+          git config --global user.email "builder@ms600.local"
+          git config --global color.ui    false
+          git config --global core.compression 0
+          mkdir -p ~/bin
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          ~/bin/repo --version || python3 ~/bin/repo --version
+
+      # -----------------------------------------------------------------
+      - name: ⑦ 初始化源码仓库（LineageOS 18.1）
+        run: |
+          mkdir -p ~/lineage
+          cd ~/lineage
+          export PATH="$HOME/bin:$PATH"
+          repo init -u https://github.com/LineageOS/android.git \
+                    -b lineage-18.1 \
+                    --git-lfs \
+                    --depth=1 \
+                    --no-clone-bundle
+
+      # -----------------------------------------------------------------
+      - name: ⑧ 同步源码（★ 最耗时，40~90 分钟）
+        run: |
+          cd ~/lineage
+          export PATH="$HOME/bin:$PATH"
+          for i in 1 2 3; do
+            echo "===== repo sync 第 $i 次尝试 ====="
+            if repo sync -c -j8 --force-sync --no-clone-bundle --no-tags; then
+              echo "::notice::repo sync 成功"
+              break
+            fi
+            echo "::warning::repo sync 失败，重试中..."
+            sleep 15
+          done
+          echo "===== 源码体积 ====="
+          du -sh ~/lineage 2>/dev/null || true
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ⑨ 放入 MS600 设备树
+        run: |
+          cd ~/lineage
+          mkdir -p device/iflytek/MS600
+          cp -rv "$GITHUB_WORKSPACE/device/iflytek/MS600/." device/iflytek/MS600/
+          echo "===== 设备树内容 ====="
+          find device/iflytek/MS600 -type f | sort
+
+      # -----------------------------------------------------------------
+      - name: ⑩ 结束（sync_only 模式）
+        if: ${{ github.event.inputs.sync_only == 'true' }}
+        run: |
+          echo "::notice::sync_only 模式，跳过编译"
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ⑪ 编译（lunch + mka）
+        if: ${{ github.event.inputs.sync_only != 'true' }}
+        run: |
+          cd ~/lineage
+          export LC_ALL=C
+          export ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh
+          echo "===== 可用 lunch 目标 ====="
+          lunch 2>&1 | tail -30 || true
+          echo "===== 选择 lineage_MS600-eng ====="
+          lunch lineage_MS600-eng
+          echo "===== 开始编译：mka ${{ github.event.inputs.build_target }} -j${{ github.event.inputs.jobs }} ====="
+          set -o pipefail
+          mka ${{ github.event.inputs.build_target }} -j${{ github.event.inputs.jobs }} 2>&1 | tee ~/lineage/build.log
+
+      # -----------------------------------------------------------------
+      - name: ⑫ 磁盘与产物概览
+        if: always()
+        run: |
+          echo "===== 磁盘 ====="; df -h /
+          echo "===== 产物 ====="
+          find ~/lineage/out/target/product -maxdepth 2 -type f \( -name '*.img' -o -name '*.zip' \) -exec ls -lh {} \; 2>/dev/null || echo "(无产物)"
+
+      # -----------------------------------------------------------------
+      - name: ⑬ 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            /home/runner/lineage/build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # -----------------------------------------------------------------
+      - name: ⑭ 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-MS600-output
+          path: |
+            /home/runner/lineage/out/target/product/MS600/*.img
+            /home/runner/lineage/out/target/product/MS600/*.zip
+          if-no-files-found: warn
+          retention-days: 14
