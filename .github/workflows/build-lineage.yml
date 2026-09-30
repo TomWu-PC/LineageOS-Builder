@@ -18,14 +18,16 @@ on:
   workflow_dispatch:
     inputs:
       build_target:
-        description: '编译目标（recoveryimage / bootimage / systemimage / bacon）'
+        description: '编译目标（recoveryimage / bootimage / snod / systemimage / bacon）'
         required: true
         default: 'recoveryimage'
         type: choice
         options:
           - recoveryimage
           - bootimage
+          - snod
           - systemimage
+          - vantage
           - bacon
       jobs:
         description: '并行编译任务数（内存吃紧就调小）'
