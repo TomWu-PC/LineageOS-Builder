@@ -179,9 +179,13 @@ jobs:
           lunch 2>&1 | tail -30 || true
           echo "===== 选择 lineage_MS600-eng ====="
           lunch lineage_MS600-eng
-          echo "===== 开始编译：mka ${{ github.event.inputs.build_target }} -j${{ github.event.inputs.jobs }} ====="
+          # ⚠️ push 事件触发时 github.event.inputs.* 为空 → 必须给默认值兜底，
+          #    否则会变成 `mka  -j`（无目标 = 编整个 ROM，烧光 6 小时额度）
+          BUILD_TARGET="${{ github.event.inputs.build_target || 'recoveryimage' }}"
+          BUILD_JOBS="${{ github.event.inputs.jobs || '4' }}"
+          echo "===== 开始编译：mka ${BUILD_TARGET} -j${BUILD_JOBS} ====="
           set -o pipefail
-          mka ${{ github.event.inputs.build_target }} -j${{ github.event.inputs.jobs }} 2>&1 | tee ~/lineage/build.log
+          mka "${BUILD_TARGET}" -j"${BUILD_JOBS}" 2>&1 | tee ~/lineage/build.log
 
       # -----------------------------------------------------------------
       - name: ⑫ 磁盘与产物概览
