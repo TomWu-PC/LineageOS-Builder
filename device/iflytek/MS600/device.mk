@@ -17,8 +17,10 @@ PRODUCT_AAPT_CONFIG      := normal
 PRODUCT_AAPT_PREF_CONFIG := hdpi
 
 # ---------------------------- 内核 ------------------------------------------
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/prebuilt/kernel:kernel
+# 内核由 BoardConfig.mk 的 TARGET_PREBUILT_KERNEL 交给 build 系统打包进 boot.img，
+# 不要再用 PRODUCT_COPY_FILES 往 /system 根目录塞一份（27.5MB 冗余，
+# 且 Android 11 会警告 "copying to system root is deprecated"）。
+# 2026-09-30 修正。
 
 # ---------------------------- 属性 ------------------------------------------
 PRODUCT_PROPERTY_OVERRIDES += \
@@ -44,6 +46,8 @@ PRODUCT_PACKAGES += \
 # 第一轮允许缺失依赖，便于逐轮补齐设备树
 ALLOW_MISSING_DEPENDENCIES := true
 
-# ---------------------------- 继承 Soong 命名空间 ---------------------------
-PRODUCT_SOONG_NAMESPACES += \
-    $(LOCAL_PATH)
+# ---------------------------- Soong 命名空间 --------------------------------
+# ⚠️ 暂不声明 PRODUCT_SOONG_NAMESPACES：本设备树目前没有任何 Android.bp，
+#    声明空的命名空间目录会让 Soong 在扫描阶段报错。
+#    等第二轮补 prebuilt HAL（每个目录带 Android.bp）时再恢复，写法：
+#      PRODUCT_SOONG_NAMESPACES += device/iflytek/MS600
