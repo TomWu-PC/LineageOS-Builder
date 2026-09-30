@@ -69,9 +69,14 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------
-      - name: ③ 释放磁盘空间
+      # ⚠️ 磁盘是本项目【头号瓶颈】，实测数据：
+      #   sync 后源码 ~32G → 编到 50% 时 out/ 已吃掉 86G → 总 146G 撑爆
+      #   （2026-10-01 run 36758761289：50% 处 "No space left on device" 全线 FAILED）
+      #   所以这一步必须尽全力清，能多挤 20~25G 就是多得 10% 进度。
+      - name: ③ 释放磁盘空间（★ 尽力清理）
         run: |
           echo "清理前："; df -h /
+          # --- GitHub runner 预装的大件（与 Android 编译无关）---
           sudo rm -rf /usr/share/dotnet                || true
           sudo rm -rf /usr/local/lib/android           || true
           sudo rm -rf /opt/ghc                         || true
@@ -81,9 +86,31 @@ jobs:
           sudo rm -rf /usr/share/swift                 || true
           sudo rm -rf /usr/local/.ghcup                || true
           sudo rm -rf /usr/local/lib/node_modules      || true
+          # --- 本轮新增：更激进的清理 ---
+          sudo rm -rf /opt/hostedtoolcache             || true   # 工具缓存（JDK 之外）
+          sudo rm -rf /usr/share/java                  || true
+          sudo rm -rf /usr/share/gradle                || true
+          sudo rm -rf /usr/local/share/chromium        || true
+          sudo rm -rf /usr/local/share/edge*           || true
+          sudo rm -rf /opt/microsoft                   || true
+          sudo rm -rf /usr/share/miniconda             || true
+          sudo rm -rf /usr/share/R                    || true
+          sudo rm -rf /opt/az                          || true
+          sudo rm -rf /usr/local/aws-cli               || true
+          sudo rm -rf /opt/google/chrome              || true
+          sudo rm -rf /usr/lib/firefox                 || true
+          sudo rm -rf /usr/share/doc                   || true
+          sudo rm -rf /usr/share/man                   || true
+          # swap 文件（编译不需要）
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /mnt/swapfile /swapfile 2>/dev/null || true
+          # --- 包管理与容器 ---
           sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*             || true
           sudo docker image prune -a -f                || true
+          sudo docker system prune -a -f --volumes     || true
           echo "清理后："; df -h /
+          echo "::notice::③ 清理完成"
 
       # -----------------------------------------------------------------
       - name: ④ 安装 JDK 11（Android 11 必需）
@@ -168,35 +195,20 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------
-      # ccache：缓存编译产物，中断重跑时能省大量时间
-      # 实测 2026-10-01：systemimage 首次全量编译任务数 109,682（recovery 仅 10,215）
-      #   单次 job 跑 2.5 小时以上时，免费 runner 会静默挂起（日志停滞、job 不结束）
-      #   → 加 ccache + 心跳监控，中断后重跑可从缓存恢复
-      - name: ⑩.5 配置 ccache
-        if: ${{ github.event.inputs.sync_only != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ github.workflow }}-${{ github.event.inputs.build_target || 'recoveryimage' }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ github.workflow }}-${{ github.event.inputs.build_target || 'recoveryimage' }}-
-            ccache-${{ github.workflow }}-
-
-      # -----------------------------------------------------------------
-      - name: ⑪ 编译（lunch + mka，带心跳监控）
+      # ⚠️ 实测 2026-10-01：ccache 对 systemimage **弊大于利**
+      #   - 缓存自身要占 20G+，而磁盘本来就不够
+      #   - 本项目每次都是"从零编一个新目标"，缓存命中率极低
+      #   → 已【关闭 ccache】，改为纯磁盘监控
+      #
+      # 已确认的 systemimage 磁盘需求（run 36758761289 实测）：
+      #   sync 后 32G → 编到 50% 时消耗 86G → 146G 撑爆
+      #   推算 100% 需 ~170G，**超出免费 runner 上限**
+      - name: ⑪ 编译（lunch + mka，带磁盘心跳监控）
         if: ${{ github.event.inputs.sync_only != 'true' }}
         run: |
           cd ~/lineage
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
-          export USE_CCACHE=1
-          export CCACHE_EXEC=/usr/bin/ccache
-          export CCACHE_DIR=$HOME/.ccache
-          export CCACHE_COMPRESS=1
-          export CCACHE_MAXSIZE=20G
-          mkdir -p "$CCACHE_DIR"
-          ccache -M 20G || true
-          ccache -z || true
           source build/envsetup.sh
           echo "===== 可用 lunch 目标 ====="
           lunch 2>&1 | tail -30 || true
@@ -213,14 +225,28 @@ jobs:
           #    否则会变成 `mka  -j`（无目标 = 编整个 ROM，烧光 6 小时额度）
           BUILD_TARGET="${{ github.event.inputs.build_target || 'recoveryimage' }}"
           BUILD_JOBS="${{ github.event.inputs.jobs || '4' }}"
+          # ---- ★ 省磁盘的关键设置 ----
+          #  1) 关闭各种"顺手产出"的调试产物
+          export WITH_DEXPREOPT=false        # 不做 dex 预优化（很吃磁盘）
+          export DONT_DEXPREOPT_PREBUILTS=true
+          export WITH_TWRP=false
+          #  2) 关掉 javac 的静态分析产物目录
+          export DISABLE_ARTIFACT_PATH_REQUIREMENTS=true
+          #  3) 不生成 symbols（每个模块的 .debug 文件能占几十 G）
+          export TARGET_KERNEL_NO_MODULES=true
           echo "===== 开始编译：mka ${BUILD_TARGET} -j${BUILD_JOBS} ====="
-          # ---- 心跳监控：每 5 分钟向 GITHUB_STEP_SUMMARY 追加一行 ----
-          #      写 summary 而不写 stdout，避免污染编译日志；
-          #      作用：万一 job 被静默挂起，能从这里看出最后活跃时间
+          # ---- 看门狗：每 5 分钟记录 进度 + 剩余磁盘 ----
+          #      磁盘低于 3G 时告警（便于事后判断是否死于爆盘）
           (
             while true; do
               sleep 300
-              echo "- [$(date -u +%H:%M:%S)] 编译中 | 任务数进度: $(grep -oE '\[ *[0-9]+% [0-9]+/[0-9]+\]' ~/lineage/build.log 2>/dev/null | tail -1)" >> $GITHUB_STEP_SUMMARY
+              AVAIL=$(df -m / | awk 'NR==2{print $4}')
+              PROG=$(grep -oE '\[ *[0-9]+% [0-9]+/[0-9]+\]' ~/lineage/build.log 2>/dev/null | tail -1)
+              OUTSZ=$(du -sm ~/lineage/out 2>/dev/null | cut -f1)
+              echo "- [$(date -u +%H:%M:%S)] 进度:$PROG | out:${OUTSZ}MB | 剩余磁盘:${AVAIL}MB" >> $GITHUB_STEP_SUMMARY
+              if [ "${AVAIL:-999999}" -lt 3072 ]; then
+                echo "::error::⚠️ 磁盘不足 3G！即将爆盘"
+              fi
             done
           ) &
           HEARTBEAT_PID=$!
@@ -229,7 +255,9 @@ jobs:
           RC=${PIPESTATUS[0]}
           kill $HEARTBEAT_PID 2>/dev/null || true
           echo "===== 编译退出码: ${RC} ====="
-          ccache -s || true
+          echo "===== out/ 最终体积 ====="
+          du -sh ~/lineage/out 2>/dev/null || true
+          df -h /
           exit $RC
 
       # -----------------------------------------------------------------
