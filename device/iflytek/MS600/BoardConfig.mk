@@ -50,6 +50,14 @@ BOARD_RAMDISK_OFFSET       := 0x01000000
 BOARD_KERNEL_OFFSET        := 0x00008000
 BOARD_DTB_OFFSET           := 0x01f00000
 BOARD_MKBOOTIMG_ARGS       := --ramdisk_offset 0x01000000 --tags_offset 0x00000100
+# ⚠️ 这里【不要】写 buildvariant=xxx！
+#    原因：DTB 的 bootargs 里本来就自带 `buildvariant=user`（实测 dtb_ms600_live.fdt 确认），
+#    而 build 系统还会按 lunch 变体再追加一个 `buildvariant=<变体>`。
+#    自己再写一个 → 三份重复，且末尾那个覆盖前面，行为不可控。
+#
+#   实测 2026-09-30 第二轮：lunch 选了 -eng，结果 cmdline 变成
+#       ... buildvariant=user buildvariant=eng    ← 末尾 eng 生效，错的
+#    正解：lunch 用 lineage_MS600-userdebug，让 build 系统自己追加 userdebug。
 BOARD_KERNEL_CMDLINE       := console=ttyHSL0,115200,n8 \
                               androidboot.console=ttyHSL0 \
                               androidboot.hardware=qcom \
@@ -57,8 +65,7 @@ BOARD_KERNEL_CMDLINE       := console=ttyHSL0,115200,n8 \
                               ehci-hcd.park=3 \
                               lpm_levels.sleep_disabled=1 \
                               androidboot.bootdevice=7824900.sdhci \
-                              earlycon=msm_hsl_uart,0x78af000 \
-                              buildvariant=user
+                              earlycon=msm_hsl_uart,0x78af000
 
 # ---------------------------- 分区（★ 本机实测）---------------------------
 # system 3.0GB · vendor 1.0GB · boot/recovery 64MB · cache 256MB
