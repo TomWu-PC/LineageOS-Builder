@@ -168,12 +168,35 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------
-      - name: ⑪ 编译（lunch + mka）
+      # ccache：缓存编译产物，中断重跑时能省大量时间
+      # 实测 2026-10-01：systemimage 首次全量编译任务数 109,682（recovery 仅 10,215）
+      #   单次 job 跑 2.5 小时以上时，免费 runner 会静默挂起（日志停滞、job 不结束）
+      #   → 加 ccache + 心跳监控，中断后重跑可从缓存恢复
+      - name: ⑩.5 配置 ccache
+        if: ${{ github.event.inputs.sync_only != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.workflow }}-${{ github.event.inputs.build_target || 'recoveryimage' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ github.workflow }}-${{ github.event.inputs.build_target || 'recoveryimage' }}-
+            ccache-${{ github.workflow }}-
+
+      # -----------------------------------------------------------------
+      - name: ⑪ 编译（lunch + mka，带心跳监控）
         if: ${{ github.event.inputs.sync_only != 'true' }}
         run: |
           cd ~/lineage
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          export CCACHE_DIR=$HOME/.ccache
+          export CCACHE_COMPRESS=1
+          export CCACHE_MAXSIZE=20G
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 20G || true
+          ccache -z || true
           source build/envsetup.sh
           echo "===== 可用 lunch 目标 ====="
           lunch 2>&1 | tail -30 || true
@@ -191,8 +214,23 @@ jobs:
           BUILD_TARGET="${{ github.event.inputs.build_target || 'recoveryimage' }}"
           BUILD_JOBS="${{ github.event.inputs.jobs || '4' }}"
           echo "===== 开始编译：mka ${BUILD_TARGET} -j${BUILD_JOBS} ====="
+          # ---- 心跳监控：每 5 分钟向 GITHUB_STEP_SUMMARY 追加一行 ----
+          #      写 summary 而不写 stdout，避免污染编译日志；
+          #      作用：万一 job 被静默挂起，能从这里看出最后活跃时间
+          (
+            while true; do
+              sleep 300
+              echo "- [$(date -u +%H:%M:%S)] 编译中 | 任务数进度: $(grep -oE '\[ *[0-9]+% [0-9]+/[0-9]+\]' ~/lineage/build.log 2>/dev/null | tail -1)" >> $GITHUB_STEP_SUMMARY
+            done
+          ) &
+          HEARTBEAT_PID=$!
           set -o pipefail
           mka "${BUILD_TARGET}" -j"${BUILD_JOBS}" 2>&1 | tee ~/lineage/build.log
+          RC=${PIPESTATUS[0]}
+          kill $HEARTBEAT_PID 2>/dev/null || true
+          echo "===== 编译退出码: ${RC} ====="
+          ccache -s || true
+          exit $RC
 
       # -----------------------------------------------------------------
       - name: ⑫ 磁盘与产物概览
