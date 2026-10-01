@@ -76,23 +76,52 @@ BOARD_USERDATAIMAGE_PARTITION_SIZE := 21196642816
 BOARD_CACHEIMAGE_PARTITION_SIZE    := 268435456
 BOARD_FLASH_BLOCK_SIZE             := 131072
 
-# 设备实测的额外根目录与软链（与 msm8953 官方参照一致）
-BOARD_ROOT_EXTRA_FOLDERS  := persist firmware
-# ⚠️ 【2026-10-01 第三次云编译（#43）失败教训 —— 已移除 /vendor/dsp:/dsp】
-#   症状：编到 99.999%（102667/102668），最后打包 system.img 时炸：
-#     set_selinux_xattr: No such file or directory searching for label "/dsp"
+# ─────────────────────────────────────────────────────────────────────────────
+# ★★★ 2026-10-01 血泪教训（连坑 3 个 run：#43 / #44 / #45）★★★
+#     —— /dsp → /firmware 连环报错的【真正根因】与【最终处置】
+# ─────────────────────────────────────────────────────────────────────────────
+# 【症状】每次都是编到 99.999%（102667/102668），最后打包 system.img 时炸：
+#     set_selinux_xattr: No such file or directory searching for label "/xxx"
 #     e2fsdroid: No such file or directory while configuring the file system
-#   根因：这里声明了软链 /vendor/dsp:/dsp，但 out/target/product/MS600/system/ 下
-#         并没有 /dsp 这个实际目录；而 device/qcom/sepolicy-legacy/common/file_contexts:610
-#         有一条 `/dsp(/.*)?  u:object_r:adsprpcd_file:s0`。
-#         Android 11 的 e2fsdroid 会【严格校验】file_contexts 每条规则的目标是否存在，
-#         找不到 /dsp 就直接失败（Android 8.1 的 15.1 不校验，所以 15.1 能过）。
-#   处置：本设备定位为【普通平板】，不需要音频 DSP（adsprpcd）相关目录，
-#         故直接去掉该软链声明，让 file_contexts 的 /dsp 规则成为"无目标的孤儿规则"。
-#   ⚠️ 注意：只删这一行即可，不要删 file_contexts 里那条规则（那是公共 sepolicy 仓）。
-BOARD_ROOT_EXTRA_SYMLINKS := \
-    /vendor/firmware_mnt:/firmware \
-    /mnt/vendor/persist:/persist
+#     ninja: build stopped: subcommand failed.
+#   其中 /xxx 先是 \"/dsp\"，删掉后又变成 \"/firmware\"、下一个会是 \"/persist\"。
+#
+# 【完整机制】（AOSP 打包链，务必理解，否则会一直"打地鼠"）
+#   ① BOARD_ROOT_EXTRA_FOLDERS / BOARD_ROOT_EXTRA_SYMLINKS 建的产物
+#      都落在 TARGET_ROOT_OUT（out/target/product/MS600/root/），也就是 ramdisk。
+#   ② 但本设备的 system.img 用的是 system-as-root（e2fsdroid -a /），
+#      Makefile 里 FULL_SYSTEMIMAGE_DEPS += $(INTERNAL_ROOT_FILES)，
+#      ⇒ root/ 的内容会被【合并进 system.img】。
+#   ③ e2fsdroid 打包时会遍历镜像内 inode 树，给每个条目查 SELinux 标签。
+#      ⇒ 镜像里出现 /firmware、/persist 这些【真实目录】就必须有对应规则。
+#   ④ 而本设备采用的 sepolicy 组合里【没有】/dsp、/firmware、/persist 的规则
+#      （实测：strings file_contexts.bin | grep -cE '^/(dsp|firmware|persist)' = 0）
+#      ⇒ selabel_lookup 失败 ⇒ e2fsdroid 直接报错退出。
+#
+# 【为什么 15.1（Android 8.1）没事】
+#   Android 8.1 的 e2fsdroid 对"查不到标签"只告警不失败；Android 11 直接 fail。
+#   同一份设备树，15.1 能编过、18.1 编不过 —— 不是配置错了，是新版本更严格。
+#
+# 【★ 最关键的坑：改声明 ≠ 清产物】
+#   BOARD_ROOT_EXTRA_* 的产物是 init.environ.rc 的 post-install 副作用，
+#   删掉声明后 init.environ.rc 会重生，但【旧的软链/目录不会被删除】——
+#   它们变成"僵尸产物"，下一轮编译照样被合并进 system.img，照炸不误。
+#   ⇒ 改完声明后，【必须】手工清掉 out/.../<dev>/root/ 里对应的僵尸条目！
+#
+# 【最终处置】本设备定位为【普通平板】：
+#   - 无音频 DSP 需求        ⇒ 不需要 /dsp
+#   - /firmware、/persist 的挂载由 recovery.fstab / fstab.qcom 负责
+#     （init 会在开机时按 fstab 挂载），不需要在 ramdisk 里预建挂载点目录。
+#   ⇒ 整块移除 BOARD_ROOT_EXTRA_FOLDERS 与 BOARD_ROOT_EXTRA_SYMLINKS。
+#   ⚠️ 删完记得清 out/.../<dev>/root/{dsp,firmware,persist} 三个僵尸。
+# ─────────────────────────────────────────────────────────────────────────────
+# （原内容，已按上述结论移除，保留备查）
+#   BOARD_ROOT_EXTRA_FOLDERS  := persist firmware
+#   BOARD_ROOT_EXTRA_SYMLINKS := \
+#       /vendor/firmware_mnt:/firmware \
+#       /mnt/vendor/persist:/persist
+BOARD_ROOT_EXTRA_FOLDERS  :=
+BOARD_ROOT_EXTRA_SYMLINKS :=
 
 # ---------------------------- 文件系统 --------------------------------------
 TARGET_USERIMAGES_USE_EXT4             := true
