@@ -181,6 +181,20 @@ jobs:
 
           MIRROR_BASE="https://mirrors.tuna.tsinghua.edu.cn/git"
 
+          # ★★★ 先清理历史残留（自建 runner 的 ~/.gitconfig 是【持久】的）★★★
+          #   run #35 实测：规则条数 = 16（不是 5），因为上一轮的旧规则还在。
+          #   不清干净 → 旧的错误 lineageOS 重写会一直污染，且条数校验永远失败。
+          #   ★ 注意 --add 只会【追加】，所以必须显式清理，否则规则无限累积！
+          echo "===== 清理旧的 url.*.insteadOf 规则（保证幂等）====="
+          BEFORE=$(git config --global --get-regexp 'url\..*\.insteadof' 2>/dev/null | wc -l)
+          echo "  清理前规则数 = $BEFORE"
+          for K in $(git config --global --get-regexp 'url\..*\.insteadof' 2>/dev/null \
+                     | awk '{print $1}' | sort -u); do
+            git config --global --unset-all "$K" 2>/dev/null || true
+          done
+          AFTER=$(git config --global --get-regexp 'url\..*\.insteadof' 2>/dev/null | wc -l)
+          echo "  清理后规则数 = $AFTER"
+
           echo "===== 探测各镜像【真实可用性】（必须 HTTP 200，不能只看连通）====="
           #  ★ 教训：run #33 里 probe 用 curl -sI 只判连通，AOSP/lineageOS/git-repo
           #    三个都报 ✅，但清华【根本没有 lineageOS 镜像目录】，实际是 404。
