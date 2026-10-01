@@ -188,44 +188,65 @@ jobs:
           probe "$MIRROR_BASE/AOSP/"                 "AOSP 镜像"
           probe "$MIRROR_BASE/git-repo"              "git-repo 镜像"
 
+          # ★★ 必须用 --add！★★
+          #   实测（本机复现）：git config url.X.insteadOf 重复写入【是覆盖不是追加】：
+          #     3 次写入 url."https://M/".insteadOf a/b/c  →  --get-regexp 只剩 c 一条
+          #   这正是 run #29 sync 超时、run #31 只剩 3 条规则的真因：
+          #     android.googlesource.com 那条被 git:// 那条覆盖后，
+          #     manifest 里 https:// 的仓库【完全没有被重写】→ 直连 Google 130 秒超时。
+          #   （上一轮误判为"续行/YAML 问题"，实测 YAML 块标量原样保留 "\"，
+          #     bash 续行是合法的 —— 真因是 git config 覆盖语义。）
+
           # ---- ① github.com/LineageOS → 清华 lineageOS ----
-          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
-                            "https://github.com/LineageOS/"
-          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
-                            "https://github.com/LineageOS"
-          # 兜底：其它 github 组织也尽量走镜像（LineageOS 用到的较少）
-          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
-                            "git://github.com/LineageOS/"
+          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS/"
+          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS"
+          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "git://github.com/LineageOS/"
 
-          # ---- ② ★ android.googlesource.com → 清华 AOSP（本次新增，关键）----
-          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
-                            "https://android.googlesource.com/"
-          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
-                            "https://android.googlesource.com"
-          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
-                            "git://android.googlesource.com/"
+          # ---- ② ★ android.googlesource.com → 清华 AOSP（关键）----
+          git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com/"
+          git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com"
+          git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "git://android.googlesource.com/"
 
-          # ---- ③ ★ gerrit.googlesource.com/git-repo → 清华 git-repo ----
-          git config --global url."$MIRROR_BASE/git-repo".insteadOf \
-                            "https://gerrit.googlesource.com/git-repo"
-          # 其余 gerrit.googlesource.com 的项目（如 lineagereview 等）走 AOSP 镜像
-          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
-                            "https://gerrit.googlesource.com/"
+          # ---- ③ ★ gerrit.googlesource.com → 清华 ----
+          git config --global --add url."$MIRROR_BASE/git-repo".insteadOf "https://gerrit.googlesource.com/git-repo"
+          git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://gerrit.googlesource.com/"
 
-          echo "===== 当前 insteadOf 规则 ====="
+          echo "===== 当前 insteadOf 规则（--add 后应为 8 条）====="
           git config --global --get-regexp 'url\..*\.insteadof' || true
+          N=$(git config --global --get-regexp 'url\..*\.insteadof' | wc -l)
+          echo "规则条数 = $N"
+          if [ "$N" -lt 8 ]; then
+            echo "::error::❌ insteadOf 规则只有 $N 条（期望 8），镜像重写不完整，中止"
+            exit 1
+          fi
 
           # ---- 网络容错：大仓库不断流 ----
-          git config --global http.postBuffer   524288000
+          git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime  999999
-          git config --global http.version       HTTP/1.1
+          git config --global http.lowSpeedTime 999999
+          git config --global http.version HTTP/1.1
 
+          # ---- ★ repo 工具：国内【必须】走清华镜像 ----
+          #   storage.googleapis.com 在国内被墙，官方一键脚本必失败（run #31 退出码 56）。
           mkdir -p ~/bin
-          curl -sL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
+          REPO_OK=0
+          for R in "$MIRROR_BASE/git-repo" "https://mirrors.tuna.tsinghua.edu.cn/git/git-repo"; do
+            echo "尝试拉取 repo 工具: $R"
+            if curl -fsSL --connect-timeout 20 "$R" -o ~/bin/repo; then
+              chmod a+x ~/bin/repo
+              if python3 ~/bin/repo --version >/dev/null 2>&1; then
+                echo "::notice::✅ repo 工具就绪（来自 $R）"
+                REPO_OK=1; break
+              fi
+            fi
+            echo "  该源不可用，换下一个"
+          done
+          if [ "$REPO_OK" != "1" ]; then
+            echo "::error::❌ 所有 repo 工具镜像均不可用"
+            exit 1
+          fi
           echo "$HOME/bin" >> $GITHUB_PATH
-          ~/bin/repo --version || python3 ~/bin/repo --version
+          python3 ~/bin/repo --version
 
       # -----------------------------------------------------------------
       - name: ⑦ 初始化源码仓库（LineageOS 18.1）
@@ -259,14 +280,10 @@ jobs:
 
           # ★ 用官方 manifest：其内部的 fetch URL 会被第⑥步的 insteadOf
           #   在 git 层面重写到清华镜像（github + android.googlesource 都已覆盖）。
+          # ★ 单行写法（同上，YAML 里 "\" 不是续行符）
           for attempt in 1 2 3; do
             echo "===== repo init 第 ${attempt} 次 ====="
-            if repo init -u https://github.com/LineageOS/android.git \
-                        -b lineage-18.1 \
-                        --repo-url="$REPO_URL_MIRROR" \
-                        --git-lfs \
-                        --depth=1 \
-                        --no-clone-bundle; then
+            if repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --repo-url="$REPO_URL_MIRROR" --git-lfs --depth=1 --no-clone-bundle; then
               echo "::notice::✅ repo init 成功"; break
             fi
             rm -rf .repo; sleep 10
@@ -309,8 +326,7 @@ jobs:
           RC=1
           for i in 1 2 3 4; do
             echo "===== repo sync 第 $i 次尝试 ====="
-            repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
-                      --retry-fetches=5 --fail-fast
+            repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --retry-fetches=5 --fail-fast
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "::notice::✅ repo sync 成功"
