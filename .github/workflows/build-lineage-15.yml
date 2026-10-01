@@ -253,6 +253,14 @@ jobs:
           #   只重写【国内确实连不通】的 googlesource 域名。
           MIRROR_BASE="https://mirrors.tuna.tsinghua.edu.cn/git"
 
+          # ★ 清理历史残留规则，保证幂等（--add 只追加，不清会无限累积）
+          echo "===== 清理旧的 url.*.insteadOf 规则 ====="
+          for K in $(git config --global --get-regexp 'url\..*\.insteadof' 2>/dev/null \
+                     | awk '{print $1}' | sort -u); do
+            git config --global --unset-all "$K" 2>/dev/null || true
+          done
+          echo "  清理后规则数 = $(git config --global --get-regexp 'url\..*\.insteadof' 2>/dev/null | wc -l)"
+
           echo "===== 探测镜像【真实可用性】（严格 HTTP 200）====="
           probe_strict() {
             code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 12 \
