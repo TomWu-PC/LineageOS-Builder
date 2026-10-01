@@ -46,7 +46,13 @@ on:
         default: false
         type: boolean
   push:
-    branches: [ lineage-15.1 ]
+    # ⚠️ 已【关闭】push 自动触发（2026-10-01 事故）：
+    #   原本 branches: [lineage-15.1] + cancel-in-progress: true 的组合，
+    #   会导致【任何一次推送】都启一个新 run 并把正在跑的编译顶掉
+    #   —— 实测 run #17（已跑 22 分钟）就是这么被 push 顶掉的。
+    #   需要自动触发时，用 Actions 页面手动 Run workflow。
+    branches-ignore:
+      - '**'
 
 concurrency:
   # ⚠️ group 里带 github.ref → 不同分支的运行【天然隔离】，不会互相顶掉。
@@ -237,31 +243,43 @@ jobs:
           git config --global color.ui    false
           git config --global core.compression 0
 
-          # ★★★ 国内镜像重写（2026-10-01 与你 18.1 线同步修复）★★★
-          #   两处大坑：
-          #   ① git config url.X.insteadOf 重复写入【是覆盖不是追加】，
-          #      必须 --add，否则同一 base 的多条规则只剩最后一条。
-          #   ② storage.googleapis.com（repo 工具官方源）在国内被墙，
-          #      必须走清华镜像；免费 runner 在境外故先前侥幸可用。
+          # ★★★ 国内镜像重写（2026-10-01，与 18.1 线同步）★★★
+          #   实测结论（本机复现）：
+          #   ① 清华 git/lineageOS/ 【不存在，404】！绝不能把 github.com/LineageOS
+          #      重写过去，否则 repo init 直接 "repository not found"。
+          #      github.com/LineageOS 直连是【可用】的，保持直连。
+          #   ② git config url.X.insteadOf 重复写入【是覆盖不是追加】，必须 --add。
+          #   ③ storage.googleapis.com 国内被墙，repo 工具需走清华。
+          #   只重写【国内确实连不通】的 googlesource 域名。
           MIRROR_BASE="https://mirrors.tuna.tsinghua.edu.cn/git"
 
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS/"
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS"
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "git://github.com/LineageOS/"
+          echo "===== 探测镜像【真实可用性】（严格 HTTP 200）====="
+          probe_strict() {
+            code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 12 \
+                   "$1/info/refs?service=git-upload-pack" 2>/dev/null || echo 000)
+            if [ "$code" = "200" ]; then echo "  ✅ $2 (HTTP $code)"
+            else echo "  ❌ $2 (HTTP $code — 不可用)"; fi
+          }
+          probe_strict "$MIRROR_BASE/AOSP/platform/compatibility/cdd" "AOSP 镜像"
+          probe_strict "$MIRROR_BASE/git-repo"                        "git-repo 镜像"
+
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com/"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "git://android.googlesource.com/"
           git config --global --add url."$MIRROR_BASE/git-repo".insteadOf "https://gerrit.googlesource.com/git-repo"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://gerrit.googlesource.com/"
 
-          echo "===== insteadOf 规则（应为 8 条）====="
+          echo "===== insteadOf 规则（应为 5 条）====="
           git config --global --get-regexp 'url\..*\.insteadof' || true
           N=$(git config --global --get-regexp 'url\..*\.insteadof' | wc -l)
           echo "规则条数 = $N"
-          if [ "$N" -lt 8 ]; then
-            echo "::error::❌ insteadOf 规则只有 $N 条（期望 8），镜像重写不完整，中止"
-            exit 1
+          if [ "$N" -lt 5 ]; then
+            echo "::error::❌ insteadOf 规则只有 $N 条（期望 5），中止"; exit 1
           fi
+          if git config --global --get-regexp 'url\..*\.insteadof' | grep -q 'github.com/LineageOS'; then
+            echo "::error::❌ github.com/LineageOS 被重写 —— 清华无此镜像，必失败！"; exit 1
+          fi
+          echo "  ✅ 确认 github.com 保持直连"
 
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
