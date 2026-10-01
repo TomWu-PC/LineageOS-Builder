@@ -78,8 +78,19 @@ BOARD_FLASH_BLOCK_SIZE             := 131072
 
 # 设备实测的额外根目录与软链（与 msm8953 官方参照一致）
 BOARD_ROOT_EXTRA_FOLDERS  := persist firmware
+# ⚠️ 【2026-10-01 第三次云编译（#43）失败教训 —— 已移除 /vendor/dsp:/dsp】
+#   症状：编到 99.999%（102667/102668），最后打包 system.img 时炸：
+#     set_selinux_xattr: No such file or directory searching for label "/dsp"
+#     e2fsdroid: No such file or directory while configuring the file system
+#   根因：这里声明了软链 /vendor/dsp:/dsp，但 out/target/product/MS600/system/ 下
+#         并没有 /dsp 这个实际目录；而 device/qcom/sepolicy-legacy/common/file_contexts:610
+#         有一条 `/dsp(/.*)?  u:object_r:adsprpcd_file:s0`。
+#         Android 11 的 e2fsdroid 会【严格校验】file_contexts 每条规则的目标是否存在，
+#         找不到 /dsp 就直接失败（Android 8.1 的 15.1 不校验，所以 15.1 能过）。
+#   处置：本设备定位为【普通平板】，不需要音频 DSP（adsprpcd）相关目录，
+#         故直接去掉该软链声明，让 file_contexts 的 /dsp 规则成为"无目标的孤儿规则"。
+#   ⚠️ 注意：只删这一行即可，不要删 file_contexts 里那条规则（那是公共 sepolicy 仓）。
 BOARD_ROOT_EXTRA_SYMLINKS := \
-    /vendor/dsp:/dsp \
     /vendor/firmware_mnt:/firmware \
     /mnt/vendor/persist:/persist
 
