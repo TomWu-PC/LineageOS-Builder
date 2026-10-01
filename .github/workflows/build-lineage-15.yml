@@ -132,12 +132,57 @@ jobs:
             cd /opt
             sudo wget -q https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u422-b05/OpenJDK8U-jdk_x64_linux_hotspot_8u422b05.tar.gz -O jdk8.tar.gz
             sudo mkdir -p /opt/jdk8 && sudo tar xzf jdk8.tar.gz -C /opt/jdk8 --strip-components=1
-            echo "JAVA_HOME=/opt/jdk8" >> $GITHUB_ENV
-            echo "/opt/jdk8/bin" >> $GITHUB_PATH
           fi
-          echo "===== 校验 ====="
-          java -version 2>&1 || true
+
+          # =============================================================
+          # ★★ 关键修复（2026-10-01）★★
+          #   GitHub runner 预装了 JDK 11，且 /usr/bin/java 优先级更高，
+          #   上轮实测：Temurin 8 装成功了，但 `java -version` 仍显示 11。
+          #   LineageOS 15.1 必须用 JDK 8 编译 → 这里强制切换默认 Java。
+          # =============================================================
+          echo "===== 定位 JDK 8 安装路径 ====="
+          JDK8=""
+          for c in /usr/lib/jvm/temurin-8-jdk-amd64 /usr/lib/jvm/java-8-temurin-amd64 /opt/jdk8; do
+            if [ -x "$c/bin/javac" ]; then JDK8="$c"; break; fi
+          done
+          if [ -z "$JDK8" ]; then
+            JDK8=$(find /usr/lib/jvm /opt -maxdepth 3 -type f -name javac 2>/dev/null \
+                   | xargs -r grep -l . 2>/dev/null | head -1 | xargs -r dirname | xargs -r dirname || true)
+          fi
+          echo "JDK8 路径 = ${JDK8:-未找到}"
+
+          if [ -n "$JDK8" ]; then
+            # ① update-alternatives 全量接管（java / javac / jar / javadoc ...）
+            for b in java javac jar javadoc jarsigner keytool; do
+              if [ -x "$JDK8/bin/$b" ]; then
+                sudo update-alternatives --install "/usr/bin/$b" "$b" "$JDK8/bin/$b" 1500 2>/dev/null || true
+                sudo update-alternatives --set "$b" "$JDK8/bin/$b" 2>/dev/null || true
+              fi
+            done
+            # ② 环境变量兜底（优先级高于 /usr/bin）
+            echo "JAVA_HOME=$JDK8" >> $GITHUB_ENV
+            echo "$JDK8/bin" >> $GITHUB_PATH
+            # ③ 极端兜底：直接覆盖 /usr/bin 下的符号链接（runner 的 JDK11 在 /opt/hostedtoolcache 或 /usr/lib/jvm）
+            sudo ln -sf "$JDK8/bin/java"  /usr/local/bin/java  2>/dev/null || true
+            sudo ln -sf "$JDK8/bin/javac" /usr/local/bin/javac 2>/dev/null || true
+            # ④ 把 runner 预装 JDK11 的 PATH 项从后续步骤里剔除（写入 env 供检查）
+            echo "::notice::✅ 默认 Java 已切到 JDK 8：$JDK8"
+          else
+            echo "::error::❌ 未能定位 JDK 8，编译必失败"
+            exit 1
+          fi
+
+          echo "===== 校验（★ 必须显示 1.8.0）====="
+          export PATH="$JDK8/bin:$PATH"
+          java  -version 2>&1 || true
           javac -version 2>&1 || true
+          java  -version 2>&1 | grep -q '1\.8\.0' \
+            && echo "::notice::✅ java 版本正确 = 1.8.0" \
+            || { echo "::error::❌ java 版本仍不是 1.8.0"; exit 1; }
+
+          echo "===== 后续步骤将使用的 java 路径 ====="
+          echo "$JDK8/bin" >> $GITHUB_PATH
+          which java javac || true
 
       # -----------------------------------------------------------------
       - name: ⑤ 安装 Python 2.7（LineageOS 15.1 必需，★ 手动补源）
@@ -247,6 +292,18 @@ jobs:
         if: ${{ github.event.inputs.sync_only != 'true' }}
         run: |
           cd ~/lineage
+          # ★ 编译前再钉一次 Java（防止 runner 自身重排 PATH）
+          export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/temurin-8-jdk-amd64}"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          echo "===== 编译环境校验 ====="
+          java  -version 2>&1 || true
+          javac -version 2>&1 || true
+          python --version 2>&1 || true
+          if ! java -version 2>&1 | grep -q '1\.8\.0'; then
+            echo "::error::❌ 编译时 java 不是 1.8.0，15.1 无法编译"
+            exit 1
+          fi
+
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
