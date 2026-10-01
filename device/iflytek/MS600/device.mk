@@ -42,6 +42,31 @@ PRODUCT_PACKAGES += \
     e2fsck \
     fsck.f2fs
 
+# ---------------------------- Recovery 初始化脚本 ----------------------------
+# ★★★ 关键修复（2026-10-01，第二次踩坑）：
+#
+#   AOSP recovery 的 init.rc 第一行是：
+#       import /init.recovery.${ro.hardware}.rc
+#   本机 ro.hardware=qcom，所以 init 会去找 /init.recovery.qcom.rc。
+#   该文件 *不在 AOSP 通用源码里*，必须由设备树提供。
+#
+#   缺了它会连锁三件事全废：
+#     ① 背光不写 panel0-backlight/brightness  → 黑屏
+#     ② /config/usb_gadget/g1 (configfs) 不建 → USB 不枚举
+#     ③ UDC 不绑定 → gadget 起不来 → init 空转 → watchdog 重启
+#
+#   ⚠️ 第一次修复只把文件放进设备树目录，但 *没有构建规则*，
+#      所以根本没进 ramdisk —— 刷完依旧黑屏。
+#
+#   正确机制（实测 build/make/core/Makefile:2234）：
+#       cp $(TARGET_ROOT_OUT)/init.recovery.*.rc $(TARGET_RECOVERY_ROOT_OUT)/
+#   build 只从 **root 分区目录** 捞 init.recovery.*.rc 进 recovery ramdisk，
+#   所以这里必须把目标写成根目录下的 init.recovery.qcom.rc，
+#   它会先被装进 out/target/product/MS600/root/，再自动进 recovery ramdisk。
+#
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/init.recovery.qcom.rc:$(TARGET_COPY_OUT_ROOT)/init.recovery.qcom.rc
+
 # ---------------------------- 构建容错 --------------------------------------
 # 第一轮允许缺失依赖，便于逐轮补齐设备树
 ALLOW_MISSING_DEPENDENCIES := true
