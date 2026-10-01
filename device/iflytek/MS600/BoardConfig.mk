@@ -4,12 +4,24 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # ===========================================================================
-#  MS600（讯飞听见 L1）BoardConfig —— 移植自 LineageOS 官方 msm8953-common
-#  所有硬件参数均为 2026-09-30 本机实测值，与官方 msm8953 参照逐项核对一致
+#  MS600（讯飞听见 L1）BoardConfig —— LineageOS 15.1（Android 8.1）
+#
+#  ★ 本文件是从 lineage-18.1 分支的设备树【降级适配】而来，
+#    目标：与设备原厂 vendor（Android 8.1 / API 27）版本完全对齐，
+#    从而让「自编 system + 原厂 vendor」能够正常协同工作。
+#
+#  降级要点（Android 11 → Android 8.1 的差异）：
+#    ① TARGET_2ND_ARCH_VARIANT 改回 armv7-a-neon
+#       （8.1 时代就是这么写的；armv8-a 是 Android 10+ 才强制）
+#    ② 删除全部 VNDK 相关（8.1 没有 VNDK 概念）
+#    ③ 删除 PRODUCT_FULL_TREBLE_OVERRIDE（8.1 无此变量）
+#    ④ 删除 BUILD_BROKEN_* 系列（8.1 不认）
+#    ⑤ 删除 TARGET_USES_MKE2FS（8.1 没有）
+#    ⑥ 关闭 Treble 相关开关
 # ===========================================================================
 
 # ---------------------------- 架构 -----------------------------------------
-# SDM450 / msm8953 = Cortex-A53 x8，64 位（设备实测 ABI = arm64-v8a）
+# SDM450 / msm8953 = Cortex-A53 x8，64 位
 TARGET_ARCH             := arm64
 TARGET_ARCH_VARIANT     := armv8-a
 TARGET_CPU_ABI          := arm64-v8a
@@ -17,20 +29,15 @@ TARGET_CPU_ABI2         :=
 TARGET_CPU_VARIANT      := cortex-a53
 
 TARGET_2ND_ARCH         := arm
-# ⚠️ 必须是 armv8-a，不能写 armv7-a-neon！
-#    Android 10+ 的 build/make/core/combo/TARGET_linux-arm.mk:53 强制要求：
-#    64 位设备上的 32 位第二架构，CPU 实际是 ARMv8，写 armv7-a-neon 会直接报
-#      error: Incorrect TARGET_2ND_ARCH_VARIANT, armv7-a-neon. Use armv8-a instead..
-#    → dumpvars 失败 → lunch 失败 → 编译一行都没跑（2026-09-30 第二次云编译死因）
-#    注意：Android 8.1 时代的 msm8953 设备树写的是 armv7-a-neon，不可照搬！
-TARGET_2ND_ARCH_VARIANT := armv8-a
+# ⚠️ 15.1（Android 8.1）时代，32 位第二架构必须写 armv7-a-neon
+#    （Android 10+ 才要求改成 armv8-a；这里是 8.1，反而要写老的）
+TARGET_2ND_ARCH_VARIANT := armv7-a-neon
 TARGET_2ND_CPU_ABI      := armeabi-v7a
 TARGET_2ND_CPU_ABI2     := armeabi
 TARGET_2ND_CPU_VARIANT  := cortex-a53
 
 TARGET_USES_64_BIT_BINDER  := true
 TARGET_SUPPORTS_64_BIT_APPS := true
-TARGET_SUPPORTS_32_BIT_APPS := true
 
 # ---------------------------- 平台 -----------------------------------------
 TARGET_BOARD_PLATFORM        := msm8953
@@ -50,14 +57,10 @@ BOARD_RAMDISK_OFFSET       := 0x01000000
 BOARD_KERNEL_OFFSET        := 0x00008000
 BOARD_DTB_OFFSET           := 0x01f00000
 BOARD_MKBOOTIMG_ARGS       := --ramdisk_offset 0x01000000 --tags_offset 0x00000100
-# ⚠️ 这里【不要】写 buildvariant=xxx！
-#    原因：DTB 的 bootargs 里本来就自带 `buildvariant=user`（实测 dtb_ms600_live.fdt 确认），
-#    而 build 系统还会按 lunch 变体再追加一个 `buildvariant=<变体>`。
-#    自己再写一个 → 三份重复，且末尾那个覆盖前面，行为不可控。
-#
-#   实测 2026-09-30 第二轮：lunch 选了 -eng，结果 cmdline 变成
-#       ... buildvariant=user buildvariant=eng    ← 末尾 eng 生效，错的
-#    正解：lunch 用 lineage_MS600-userdebug，让 build 系统自己追加 userdebug。
+# ⚠️ 【不要】写 buildvariant=xxx！
+#    DTB 的 bootargs 里自带 `buildvariant=user`，build 系统还会按 lunch 变体追加一个。
+#    自己再写一个 → 三份重复，末尾那个生效，行为不可控。
+#    正解：lunch 用 lineage_MS600-userdebug，让 build 系统自己追加。
 BOARD_KERNEL_CMDLINE       := console=ttyHSL0,115200,n8 \
                               androidboot.console=ttyHSL0 \
                               androidboot.hardware=qcom \
@@ -76,7 +79,7 @@ BOARD_USERDATAIMAGE_PARTITION_SIZE := 21196642816
 BOARD_CACHEIMAGE_PARTITION_SIZE    := 268435456
 BOARD_FLASH_BLOCK_SIZE             := 131072
 
-# 设备实测的额外根目录与软链（与 msm8953 官方参照一致）
+# 设备实测的额外根目录与软链
 BOARD_ROOT_EXTRA_FOLDERS  := persist firmware
 BOARD_ROOT_EXTRA_SYMLINKS := \
     /vendor/dsp:/dsp \
@@ -86,7 +89,6 @@ BOARD_ROOT_EXTRA_SYMLINKS := \
 # ---------------------------- 文件系统 --------------------------------------
 TARGET_USERIMAGES_USE_EXT4             := true
 TARGET_USERIMAGES_USE_F2FS             := true
-TARGET_USES_MKE2FS                     := true
 BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE     := ext4
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE   := ext4
 BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE      := ext4
@@ -96,32 +98,11 @@ BOARD_HAS_LARGE_FILESYSTEM             := true
 # A-only 单槽设备，无 A/B、无 dynamic partitions、无 metadata 分区
 AB_OTA_UPDATER                  := false
 BOARD_USES_METADATA_PARTITION   := false
-BOARD_SUPER_PARTITION_SIZE      :=
 
 # ---------------------------- AVB 验证启动 ----------------------------------
 # ★ 实测结论：原厂 boot / recovery 分区内均搜不到 AVB0 / vbmeta 签名，
 #   且 bootloader 处于 orange（已解锁）状态 → 本设备不做 AVB 强校验。
-#   若强制开启 AVB 会导致编译产物带测试签名，反而可能启动失败，故关闭。
 BOARD_AVB_ENABLE := false
-# 关闭 dm-verity（与上面呼应，避免 system 被强行加密校验）
-BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS :=
-
-# ---------------------------- Treble --------------------------------------
-# 设备实测 ro.treble.enabled=true，且存在独立 vendor 分区
-PRODUCT_FULL_TREBLE_OVERRIDE := true
-BOARD_VNDK_VERSION           := current
-# ⚠️ 这里绝对不能写 PRODUCT_EXTRA_VNDK_VERSIONS！
-#    它是【产品级只读变量】，只能写在产品配置文件（device.mk / lineage_MS600.mk）里。
-#    写在这里会直接报错：
-#      BoardConfig.mk:101: error: cannot assign to readonly variable: PRODUCT_EXTRA_VNDK_VERSIONS
-#      → dumpvars failed → lunch 失败 → 编译一行都没跑
-#    （2026-09-30 第一次云编译就是死在这一行）
-#
-# 【遗留问题，后续轮次再处理】
-#   原厂 vendor 是 Android 8.1（VNDK 27），理论上需要额外产出低版本 VNDK 兼容库，
-#   但 AOSP 11 的 prebuilts/vndk/ 里只有 v28/v29，**没有 v27**，
-#   所以直接把 27 填进去大概率还是会报「不支持的 VNDK 版本」。
-#   正确解法留待第二轮评估（可选方向：BOARD_VNDK_VERSION 降级 / 从原厂 vendor 提取 v27 库）。
 
 # ---------------------------- Recovery ------------------------------------
 TARGET_RECOVERY_FSTAB    := device/iflytek/MS600/recovery.fstab
@@ -133,4 +114,11 @@ TARGET_USES_ION := true
 # ---------------------------- 构建容错 --------------------------------------
 # 设备树尚未补齐全部 vendor 依赖时，允许缺失依赖继续构建（便于逐轮迭代）
 BUILD_BROKEN_DUP_RULES := true
-BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
+
+# ===========================================================================
+# 【15.1 已删除的 18.1 专有配置】——记录在此，防止误加回来
+# ===========================================================================
+# ✗ BOARD_VNDK_VERSION                  / VNDK 是 Android 9+ 概念，8.1 无
+# ✗ PRODUCT_FULL_TREBLE_OVERRIDE        / 产品级变量，且 8.1 不认
+# ✗ TARGET_USES_MKE2FS                  / 8.1 没有 mke2fs 支持
+# ✗ BUILD_BROKEN_ELF_PREBUILT_*         / Android 10+ 才有的开关
