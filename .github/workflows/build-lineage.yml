@@ -48,7 +48,12 @@ on:
           - github
           - self-hosted
   push:
-    branches: [ main, master ]
+    # ⚠️ 已【关闭】push 自动触发（2026-10-01 事故）：
+    #   push + concurrency.cancel-in-progress 的组合，会让【每次推送 workflow
+    #   或设备树】都启一个新 run，把正在跑的编译顶掉、并烧掉一次昂贵构建。
+    #   需要跑编译时：Actions 页面手动 Run workflow（可指定 build_target）。
+    branches-ignore:
+      - '**'
 
 concurrency:
   # 同一分支只保留最新一次运行；新运行会自动顶掉排队中/执行中的旧运行。
