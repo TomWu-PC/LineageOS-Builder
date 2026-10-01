@@ -342,27 +342,28 @@ jobs:
           export PATH="$HOME/bin:$PATH"
 
           # ============ ★ 前置自检（防止 again 直连 Google）============
-          echo "===== 自检 1：android.googlesource.com 是否已重写 ====="
+          # ★ 教训（run #36）：别用 `git config --get-urlmatch url <URL>` 验 insteadOf！
+          #   实测它查的是 url.<base>.<key> 形式的配置（如 url.X.proxy），
+          #   【跟 insteadOf 规则无关】，即使重写已生效也返回 exit 1 → 误报拦截。
+          #   唯一可靠的验证 = 直接 git ls-remote 打一次真实流量。
+          echo "===== 自检 1：insteadOf 规则抽查 ====="
+          git config --global --get-regexp 'url\..*\.insteadof' | grep android.googlesource \
+            && echo "  ✅ android.googlesource.com 重写规则存在" \
+            || { echo "::error::❌ 缺 android.googlesource.com 重写规则"; exit 1; }
+
+          echo "===== 自检 2：实测 AOSP 仓库连通性（真流量）====="
           TEST_URL="https://android.googlesource.com/platform/compatibility/cdd"
-          REWRITTEN=$(git config --get-urlmatch url "$TEST_URL" 2>/dev/null || true)
           echo "  测试 URL : $TEST_URL"
-          echo "  重写结果 : ${REWRITTEN:-（未重写！）}"
-          if [ -z "$REWRITTEN" ]; then
-            echo "::error::❌ android.googlesource.com 未被重写，sync 会直连 Google 超时"
+          if timeout 60 git ls-remote --heads "$TEST_URL" >/dev/null 2>&1; then
+            echo "::notice::✅ 重写生效，AOSP 仓库可达"
+          else
+            echo "::error::❌ AOSP 仓库不可达 —— 中止以免空跑 1 小时"
             git config --global --get-regexp 'url\..*\.insteadof' || echo "  （无规则）"
             exit 1
           fi
 
-          echo "===== 自检 2：实际连通性 ====="
-          if timeout 40 git ls-remote --heads "$TEST_URL" HEAD >/dev/null 2>&1; then
-            echo "::notice::✅ 重写后的 AOSP 镜像可达"
-          else
-            echo "::error::❌ 重写后仍不可达 —— 中止以免空跑 1 小时"
-            exit 1
-          fi
-
           echo "===== 自检 3：manifest 源（GitHub）可达 ====="
-          if timeout 40 git ls-remote --heads https://github.com/LineageOS/android.git >/dev/null 2>&1; then
+          if timeout 60 git ls-remote --heads https://github.com/LineageOS/android.git >/dev/null 2>&1; then
             echo "::notice::✅ github.com/LineageOS 直连可用"
           else
             echo "::warning::⚠️ GitHub 直连不通，continue 但 sync 可能失败"
