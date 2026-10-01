@@ -176,49 +176,68 @@ jobs:
 
           MIRROR_BASE="https://mirrors.tuna.tsinghua.edu.cn/git"
 
-          echo "===== 探测各镜像可达性 ====="
-          probe() {
-            if curl -sI --connect-timeout 12 "$1" >/dev/null 2>&1; then
-              echo "  ✅ $2"; return 0
+          echo "===== 探测各镜像【真实可用性】（必须 HTTP 200，不能只看连通）====="
+          #  ★ 教训：run #33 里 probe 用 curl -sI 只判连通，AOSP/lineageOS/git-repo
+          #    三个都报 ✅，但清华【根本没有 lineageOS 镜像目录】，实际是 404。
+          probe_strict() {
+            code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 12 \
+                   "$1/info/refs?service=git-upload-pack" 2>/dev/null || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "  ✅ $2  (HTTP $code)"; return 0
             else
-              echo "  ❌ $2（将保留官方源）"; return 1
+              echo "  ❌ $2  (HTTP $code — 不可用)"; return 1
             fi
           }
-          probe "$MIRROR_BASE/lineageOS/"            "lineageOS 镜像"
-          probe "$MIRROR_BASE/AOSP/"                 "AOSP 镜像"
-          probe "$MIRROR_BASE/git-repo"              "git-repo 镜像"
+          probe_strict "$MIRROR_BASE/AOSP/platform/compatibility/cdd" "AOSP 镜像"
+          probe_strict "$MIRROR_BASE/git-repo"                        "git-repo 镜像"
 
-          # ★★ 必须用 --add！★★
-          #   实测（本机复现）：git config url.X.insteadOf 重复写入【是覆盖不是追加】：
-          #     3 次写入 url."https://M/".insteadOf a/b/c  →  --get-regexp 只剩 c 一条
-          #   这正是 run #29 sync 超时、run #31 只剩 3 条规则的真因：
-          #     android.googlesource.com 那条被 git:// 那条覆盖后，
-          #     manifest 里 https:// 的仓库【完全没有被重写】→ 直连 Google 130 秒超时。
-          #   （上一轮误判为"续行/YAML 问题"，实测 YAML 块标量原样保留 "\"，
-          #     bash 续行是合法的 —— 真因是 git config 覆盖语义。）
+          echo "===== 探测 GitHub 直连（manifest 必需）====="
+          if curl -s -o /dev/null -w '%{http_code}' --connect-timeout 12 \
+               "https://github.com/LineageOS/android.git/info/refs?service=git-upload-pack" \
+               | grep -q 200; then
+            echo "::notice::✅ github.com/LineageOS 直连可用（manifest 走这里）"
+          else
+            echo "::warning::⚠️ github.com 直连不通 —— manifest 可能拉不下来"
+          fi
 
-          # ---- ① github.com/LineageOS → 清华 lineageOS ----
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS/"
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "https://github.com/LineageOS"
-          git config --global --add url."$MIRROR_BASE/lineageOS/".insteadOf "git://github.com/LineageOS/"
+          # ★★★ 镜像重写策略（2026-10-01 run #33 失败后修正）★★★
+          #   实测结论（本机复现验证）：
+          #     ① 清华 git/lineageOS/   → 【不存在，404】！千万别把 github.com/LineageOS
+          #        重写过去，否则 repo init 直接 "repository not found"（run #33 就这么挂的）
+          #     ② github.com/LineageOS/* → 【直连可用】，做 manifest 拉取毫无问题
+          #     ③ git config url.X.insteadOf 重复写入【是覆盖不是追加】，必须 --add
+          #        （run #29 超时、run #31 只剩 3 条规则的真因）
+          #
+          #   最终策略：只重写【国内确实连不通】的两个域名，GitHub 保持直连。
+          #     android.googlesource.com  → 清华 AOSP      ✅ 已验证 200
+          #     gerrit.googlesource.com   → 清华 git-repo   ✅ 已验证 200
 
-          # ---- ② ★ android.googlesource.com → 清华 AOSP（关键）----
+          # ---- ★ android.googlesource.com → 清华 AOSP（关键）----
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com/"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://android.googlesource.com"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "git://android.googlesource.com/"
 
-          # ---- ③ ★ gerrit.googlesource.com → 清华 ----
+          # ---- ★ gerrit.googlesource.com → 清华 ----
           git config --global --add url."$MIRROR_BASE/git-repo".insteadOf "https://gerrit.googlesource.com/git-repo"
           git config --global --add url."$MIRROR_BASE/AOSP/".insteadOf "https://gerrit.googlesource.com/"
 
-          echo "===== 当前 insteadOf 规则（--add 后应为 8 条）====="
+          # ---- GitHub 保持直连，【不做任何重写】----
+          echo "  （github.com/LineageOS 保持直连 —— 清华无此镜像）"
+
+          echo "===== 当前 insteadOf 规则（应为 5 条）====="
           git config --global --get-regexp 'url\..*\.insteadof' || true
           N=$(git config --global --get-regexp 'url\..*\.insteadof' | wc -l)
           echo "规则条数 = $N"
-          if [ "$N" -lt 8 ]; then
-            echo "::error::❌ insteadOf 规则只有 $N 条（期望 8），镜像重写不完整，中止"
+          if [ "$N" -lt 5 ]; then
+            echo "::error::❌ insteadOf 规则只有 $N 条（期望 5），镜像重写不完整，中止"
             exit 1
           fi
+          # 自我保护：确认没有把 github.com 重写走
+          if git config --global --get-regexp 'url\..*\.insteadof' | grep -q 'github.com/LineageOS'; then
+            echo "::error::❌ 检测到 github.com/LineageOS 被重写 —— 清华无此镜像，必失败！"
+            exit 1
+          fi
+          echo "  ✅ 确认 github.com 未被重写"
 
           # ---- 网络容错：大仓库不断流 ----
           git config --global http.postBuffer 524288000
@@ -303,21 +322,31 @@ jobs:
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
 
-          # ============ ★ 镜像重写自检（防止 again 直连 Google）============
-          echo "===== 自检：android.googlesource.com 是否已重写 ====="
+          # ============ ★ 前置自检（防止 again 直连 Google）============
+          echo "===== 自检 1：android.googlesource.com 是否已重写 ====="
           TEST_URL="https://android.googlesource.com/platform/compatibility/cdd"
           REWRITTEN=$(git config --get-urlmatch url "$TEST_URL" 2>/dev/null || true)
           echo "  测试 URL : $TEST_URL"
           echo "  重写结果 : ${REWRITTEN:-（未重写！）}"
-
-          echo "===== 自检：实际连通性（走 git ls-remote）====="
-          if timeout 40 git ls-remote --heads "$TEST_URL" HEAD >/dev/null 2>&1; then
-            echo "::notice::✅ android.googlesource.com 可达（镜像生效）"
-          else
-            echo "::error::❌ android.googlesource.com 仍不可达 —— 镜像重写没生效，中止以免空跑 1 小时"
-            echo "  当前所有 insteadOf 规则："
-            git config --global --get-regexp 'url\..*\.insteadof' || echo "  （无）"
+          if [ -z "$REWRITTEN" ]; then
+            echo "::error::❌ android.googlesource.com 未被重写，sync 会直连 Google 超时"
+            git config --global --get-regexp 'url\..*\.insteadof' || echo "  （无规则）"
             exit 1
+          fi
+
+          echo "===== 自检 2：实际连通性 ====="
+          if timeout 40 git ls-remote --heads "$TEST_URL" HEAD >/dev/null 2>&1; then
+            echo "::notice::✅ 重写后的 AOSP 镜像可达"
+          else
+            echo "::error::❌ 重写后仍不可达 —— 中止以免空跑 1 小时"
+            exit 1
+          fi
+
+          echo "===== 自检 3：manifest 源（GitHub）可达 ====="
+          if timeout 40 git ls-remote --heads https://github.com/LineageOS/android.git >/dev/null 2>&1; then
+            echo "::notice::✅ github.com/LineageOS 直连可用"
+          else
+            echo "::warning::⚠️ GitHub 直连不通，continue 但 sync 可能失败"
           fi
           echo "=================================================="
 
