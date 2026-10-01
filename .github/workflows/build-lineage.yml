@@ -161,21 +161,61 @@ jobs:
           git config --global color.ui    false
           git config --global core.compression 0
 
-          # ★★★ 国内服务器关键配置（2026-10-01）★★★
-          #   aosp/LineageOS 源码全在 github.com —— 国内直连极慢且常断。
-          #   用 url.<镜像>.insteadOf 把 github.com 重写到国内镜像。
-          #   清华 TUNA 有 LineageOS 完整镜像。
-          echo "===== 探测镜像可达性 ====="
-          GH_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/lineageOS"
-          if curl -sI --connect-timeout 12 "$GH_MIRROR/" >/dev/null 2>&1; then
-            echo "::notice::✅ 清华 LineageOS 镜像可达，启用 insteadOf 重写"
-            # ★ 只重写 LineageOS 官方组织，避免影响其它 github 仓库
-            git config --global url."$GH_MIRROR/".insteadOf "https://github.com/LineageOS/"
-            git config --global url."$GH_MIRROR/".insteadOf "https://github.com/LineageOS"
-          else
-            echo "::warning::镜像不可达，保留官方源"
-          fi
-          # 加大 git 缓冲，减少大仓库断流
+          # ★★★ 国内服务器关键配置（2026-10-01 二次修复）★★★
+          #   LineageOS 18.1 源码分散在两处，【两个都要重写】，缺一不可：
+          #     ① github.com/LineageOS/*            → 清华 lineageOS 镜像
+          #     ② android.googlesource.com/platform/* → 清华 AOSP 镜像
+          #     ③ gerrit.googlesource.com/git-repo   → 清华 git-repo 镜像
+          #
+          #   ★ run #29 失败真因（实测日志）：
+          #     fatal: unable to access
+          #       'https://android.googlesource.com/platform/compatibility/cdd/':
+          #       Failed to connect to android.googlesource.com port 443
+          #       after 130958 ms: Connection timed out
+          #   上一轮只重写了 ①，漏了 ②③ → 每次 sync 到 AOSP 仓库就超时 130 秒。
+
+          MIRROR_BASE="https://mirrors.tuna.tsinghua.edu.cn/git"
+
+          echo "===== 探测各镜像可达性 ====="
+          probe() {
+            if curl -sI --connect-timeout 12 "$1" >/dev/null 2>&1; then
+              echo "  ✅ $2"; return 0
+            else
+              echo "  ❌ $2（将保留官方源）"; return 1
+            fi
+          }
+          probe "$MIRROR_BASE/lineageOS/"            "lineageOS 镜像"
+          probe "$MIRROR_BASE/AOSP/"                 "AOSP 镜像"
+          probe "$MIRROR_BASE/git-repo"              "git-repo 镜像"
+
+          # ---- ① github.com/LineageOS → 清华 lineageOS ----
+          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
+                            "https://github.com/LineageOS/"
+          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
+                            "https://github.com/LineageOS"
+          # 兜底：其它 github 组织也尽量走镜像（LineageOS 用到的较少）
+          git config --global url."$MIRROR_BASE/lineageOS/".insteadOf \
+                            "git://github.com/LineageOS/"
+
+          # ---- ② ★ android.googlesource.com → 清华 AOSP（本次新增，关键）----
+          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
+                            "https://android.googlesource.com/"
+          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
+                            "https://android.googlesource.com"
+          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
+                            "git://android.googlesource.com/"
+
+          # ---- ③ ★ gerrit.googlesource.com/git-repo → 清华 git-repo ----
+          git config --global url."$MIRROR_BASE/git-repo".insteadOf \
+                            "https://gerrit.googlesource.com/git-repo"
+          # 其余 gerrit.googlesource.com 的项目（如 lineagereview 等）走 AOSP 镜像
+          git config --global url."$MIRROR_BASE/AOSP/".insteadOf \
+                            "https://gerrit.googlesource.com/"
+
+          echo "===== 当前 insteadOf 规则 ====="
+          git config --global --get-regexp 'url\..*\.insteadof' || true
+
+          # ---- 网络容错：大仓库不断流 ----
           git config --global http.postBuffer   524288000
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime  999999
@@ -193,57 +233,77 @@ jobs:
           mkdir -p ~/lineage
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
+
+          # ★★ 清掉可能残留的旧 .repo（上一轮失败留下的，URL 已被固化）★★
+          if [ -d .repo ]; then
+            echo "发现残留 .repo，清理（避免固化的旧 URL 影响重写）"
+            chmod -R u+w .repo 2>/dev/null || true
+            rm -rf .repo
+          fi
+
           # ★★★ 国内服务器（阿里云）关键修复（2026-10-01）★★★
           #   repo 工具自身的源码托管在 gerrit.googlesource.com，国内直连【必失败】：
           #     fatal: unable to access 'https://gerrit.googlesource.com/git-repo/':
           #            Failed to connect to gerrit.googlesource.com port 443
-          #   解法：--repo-url 指向【清华 TUNA 镜像】。
-          #   MANIFEST_URL 也一并走 TUNA，速度更快更稳。
-          #   国内镜像可用性：https://mirrors.tuna.tsinghua.edu.cn/git/
+          #   解法：--repo-url 指向【清华 TUNA git-repo 镜像】。
+          #   ★ manifest 用【官方 + insteadOf 重写】最稳（清华 manifest 镜像可能不同步）。
           REPO_URL_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/git-repo"
-          MANIFEST_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/lineageOS/LineageOS/android.git"
 
-          echo "===== 探测镜像可达性 ====="
+          echo "===== 探测 git-repo 镜像可达性 ====="
           if curl -sI --connect-timeout 12 "$REPO_URL_MIRROR" >/dev/null 2>&1; then
-            echo "::notice::✅ 清华 TUNA 镜像可达"
+            echo "::notice::✅ 清华 git-repo 镜像可达"
           else
             echo "::warning::清华镜像不可达，回退官方源（可能失败）"
             REPO_URL_MIRROR="https://gerrit.googlesource.com/git-repo"
           fi
 
-          # 尝试 1：清华镜像（repo 工具 + manifest 都走镜像）
-          ok=0
-          for attempt in 1 2; do
-            echo "===== repo init 第 ${attempt} 次（TUNA 镜像）====="
-            if repo init -u "$MANIFEST_MIRROR" \
+          # ★ 用官方 manifest：其内部的 fetch URL 会被第⑥步的 insteadOf
+          #   在 git 层面重写到清华镜像（github + android.googlesource 都已覆盖）。
+          for attempt in 1 2 3; do
+            echo "===== repo init 第 ${attempt} 次 ====="
+            if repo init -u https://github.com/LineageOS/android.git \
                         -b lineage-18.1 \
                         --repo-url="$REPO_URL_MIRROR" \
                         --git-lfs \
                         --depth=1 \
                         --no-clone-bundle; then
-              ok=1; echo "::notice::✅ repo init 成功（镜像）"; break
+              echo "::notice::✅ repo init 成功"; break
             fi
-            rm -rf .repo; sleep 8
+            rm -rf .repo; sleep 10
+            [ "$attempt" = "3" ] && { echo "::error::❌ repo init 全失败"; exit 1; }
           done
 
-          # 尝试 2：官方 manifest + 镜像 repo 工具（清华 manifest 有时不同步）
-          if [ "$ok" != "1" ]; then
-            echo "::warning::镜像 manifest 失败，改用官方 manifest + 镜像 repo 工具"
-            rm -rf .repo
-            repo init -u https://github.com/LineageOS/android.git \
-                      -b lineage-18.1 \
-                      --repo-url="$REPO_URL_MIRROR" \
-                      --git-lfs --depth=1 --no-clone-bundle || {
-              echo "::error::❌ repo init 全部方案失败"; exit 1; }
+          echo "===== 校验 manifest 中的 fetch URL ====="
+          if [ -f .repo/manifests/default.xml ]; then
+            grep -oE 'fetch="[^"]+"' .repo/manifests/default.xml | sort -u | head
           fi
-          echo "===== .repo/manifests 已就绪 ====="
-          ls -la .repo/ | head
+          echo "===== .repo 就绪 ====="
+          ls .repo/ | head
 
       # -----------------------------------------------------------------
       - name: ⑧ 同步源码（★ 最耗时，实测约 11 分钟）
         run: |
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
+
+          # ============ ★ 镜像重写自检（防止 again 直连 Google）============
+          echo "===== 自检：android.googlesource.com 是否已重写 ====="
+          TEST_URL="https://android.googlesource.com/platform/compatibility/cdd"
+          REWRITTEN=$(git config --get-urlmatch url "$TEST_URL" 2>/dev/null || true)
+          echo "  测试 URL : $TEST_URL"
+          echo "  重写结果 : ${REWRITTEN:-（未重写！）}"
+
+          echo "===== 自检：实际连通性（走 git ls-remote）====="
+          if timeout 40 git ls-remote --heads "$TEST_URL" HEAD >/dev/null 2>&1; then
+            echo "::notice::✅ android.googlesource.com 可达（镜像生效）"
+          else
+            echo "::error::❌ android.googlesource.com 仍不可达 —— 镜像重写没生效，中止以免空跑 1 小时"
+            echo "  当前所有 insteadOf 规则："
+            git config --global --get-regexp 'url\..*\.insteadof' || echo "  （无）"
+            exit 1
+          fi
+          echo "=================================================="
+
           # 国内网络：降低并发、加大超时，失败自动重试
           set +e
           RC=1
