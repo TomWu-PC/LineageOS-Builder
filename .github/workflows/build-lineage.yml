@@ -39,6 +39,14 @@ on:
         required: true
         default: false
         type: boolean
+      clean_source:
+        description: '源码树清理：auto=智能保留（增量同步，1~3分钟）；force=强制清空重下（源码树损坏时用，约77分钟）'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - force
       runner:
         description: '运行器：github=免费云机器（146G磁盘，编不了systemimage）；self-hosted=自建云服务器（需先配好）'
         required: true
@@ -293,21 +301,49 @@ jobs:
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
 
-          # ★★★ run #38 诊断结论（实测）★★★
-          #   去掉 --depth=1 后，manifest 仓库已【不是浅克隆】，
-          #   HEAD 也正是要 checkout 的 88e3708275...，但【仍报同样的错】：
-          #     LineageOS/android checkout 88e370827501474db8f1905128fdea2e8128ead4
-          #     LineageOS/android_bootable_recovery checkout ac8c9e9662...   ← 随机仓库
-          #   → 说明根因不是浅克隆，而是【工作树与 .repo 状态不一致】：
-          #     上一轮失败留下的 2.1G 工作树（bootable/ frameworks/ 等）还在，
-          #     只删了 .repo，导致 checkout 时目录状态对不上。
-          #   → 修法：【整个 ~/lineage 清空重建】。
-          #     ⚠️ 代价：要重新 sync（国内镜像下约 20~30 分钟），但这是唯一干净的做法。
-          if [ -d ~/lineage ]; then
-            echo "===== 清空上一次的 ~/lineage（含工作树，避免 .repo/工作树不一致）====="
+          # ★★★ 源码树清理策略（2026-10-01 第二次修订）★★★
+          #   历史教训：
+          #     run #37/#38 报 `SyncFailFastError: checkout <SHA>`，根因是
+          #     【工作树与 .repo 状态不一致】（上一轮失败留下的残缺工作树 + 新 .repo）。
+          #     当时的修法是"无条件 rm -rf ~/lineage"，确实治好了病，
+          #     但代价是**每轮都全量重下**（18.1 约 77 分钟 / 103G）。
+          #
+          #   ★ 现在的策略：【默认保留，只在确认损坏时才清空】
+          #     repo sync 本身是增量的 —— 源码树完好时补齐差异只要 1~3 分钟。
+          #     只有下面三种情况才需要全量重建：
+          #       ① 从没同步过（没有 .repo）
+          #       ② .repo 损坏（有目录但没有 manifest.xml）
+          #       ③ .repo 有、工作树空 → 典型的"状态不一致"
+          #
+          #   想强制全量重建时：workflow_dispatch 时把 clean_source 选 force。
+          CLEAN_MODE="${{ github.event.inputs.clean_source || 'auto' }}"
+          echo "===== 源码树清理策略: $CLEAN_MODE ====="
+
+          NEED_CLEAN=0
+          REASON=""
+
+          if [ "$CLEAN_MODE" = "force" ]; then
+            NEED_CLEAN=1; REASON="用户显式指定 force"
+          elif [ ! -d ~/lineage/.repo ]; then
+            NEED_CLEAN=1; REASON="从未同步过（无 .repo）"
+          elif [ ! -s ~/lineage/.repo/manifest.xml ]; then
+            NEED_CLEAN=1; REASON=".repo 缺少 manifest.xml（损坏）"
+          elif [ -d ~/lineage/.repo ] && [ ! -d ~/lineage/frameworks/base ]; then
+            NEED_CLEAN=1; REASON=".repo 存在但工作树缺失（状态不一致）"
+          fi
+
+          if [ "$NEED_CLEAN" = "1" ]; then
+            echo "::warning::需要全量重建源码树 —— 原因: $REASON"
+            if [ -d ~/lineage ]; then
+              du -sh ~/lineage 2>/dev/null || true
+              chmod -R u+w ~/lineage 2>/dev/null || true
+              rm -rf ~/lineage
+            fi
+          else
+            echo "::notice::✅ 复用已有源码树，repo sync 将【增量】补齐（通常 1~3 分钟）"
             du -sh ~/lineage 2>/dev/null || true
-            chmod -R u+w ~/lineage 2>/dev/null || true
-            rm -rf ~/lineage
+            echo "  工作树目录数 = $(ls -1 ~/lineage 2>/dev/null | wc -l)"
+            echo "  .repo 存在     = $([ -d ~/lineage/.repo ] && echo yes || echo no)"
           fi
           mkdir -p ~/lineage
           cd ~/lineage
