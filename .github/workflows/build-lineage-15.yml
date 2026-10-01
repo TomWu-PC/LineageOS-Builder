@@ -385,27 +385,45 @@ jobs:
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
 
-          # ★★★ Jack server 修复（run #27 实测真因）★★★
+          # ★★★ Jack server 修复（run #27 实测真因，两层）★★★
           #   现象（编译到 11%，10292/89173 个任务时）：
           #     [ 11% 10292/89173] Ensuring Jack server is installed and started
           #     FAILED: setup-jack-server
           #     Launching Jack server java -XX:MaxJavaStackTraceDepth=-1 ...
-          #     Jack server failed to (re)start, try 'jack-diagnose'
-          #   真因：Jack 是 Android 8.1 的 Java 编译器守护进程，
-          #     默认会要很大的堆（-Xmx），而 GitHub 免费 runner 只有【7 GB 内存】，
-          #     且 -j4 并行编译已吃掉大半 → Jack server JVM 起不来。
-          #   修法：① 显式把 Jack 堆限到 3g（够用且不会 OOM）
-          #         ② 关掉 Jack 的 "占用全部内存" 行为
-          #         ③ 清理可能存在的旧 jack server
+          #     Jack server failed to (re)start
+          #     SSL error when connecting to the Jack server.
+          #
+          #   真因 ①【主因】SSL 算法被新 JDK 禁用（最关键！）
+          #     Jack 用 SSL 在 client/server 间通信，keystore 是旧格式，
+          #     而 JDK 8u504（Temurin 最新）默认开了
+          #     `jdk.certpath.disabledAlgorithms=MD2` 和
+          #     `jdk.tls.disabledAlgorithms=SSLv3, RC4, DES, MD5withRSA, ...`
+          #     → Jack 的握手被拒 → "SSL error when connecting to the Jack server"
+          #     这是 Android 8.1 时代项目在新 JDK 上的【头号拦路虎】。
+          #   真因 ②【次因】内存：Jack 默认堆很大，runner 仅 ~7G。
+          #
+          #   修法：先放开 java.security 的算法限制，再限 Jack 堆并降并发。
+          JAVA_SEC="$JAVA_HOME/jre/lib/security/java.security"
+          if [ -f "$JAVA_SEC" ]; then
+            echo "===== 放开 JDK 安全算法限制（Jack SSL 必需）====="
+            sudo cp -n "$JAVA_SEC" "$JAVA_SEC.bak" 2>/dev/null || true
+            sudo sed -i 's/^jdk\.tls\.disabledAlgorithms=.*/jdk.tls.disabledAlgorithms=SSLv3/' "$JAVA_SEC" 2>/dev/null || true
+            sudo sed -i 's/^jdk\.certpath\.disabledAlgorithms=.*/jdk.certpath.disabledAlgorithms=MD2/' "$JAVA_SEC" 2>/dev/null || true
+            sudo sed -i 's/^jdk\.jar\.disabledAlgorithms=.*/jdk.jar.disabledAlgorithms=MD2/' "$JAVA_SEC" 2>/dev/null || true
+            grep -E '^jdk\.(tls|certpath|jar)\.disabledAlgorithms' "$JAVA_SEC" 2>/dev/null || true
+          else
+            echo "::warning::未找到 $JAVA_SEC，跳过算法放开"
+          fi
+
+          # 内存：显式限制 Jack 堆，并关掉"吃满内存"的行为
           export JACK_SERVER_VM_ARGUMENTS="-Dfile.encoding=UTF-8 -XX:+TieredCompilation -Xmx3g"
-          export JACK_OPTIONAL_WARNINGED_ABOUT_UNSUPPORTED="true"
           export ANDROID_JACK_VM_ARGS="$JACK_SERVER_VM_ARGUMENTS"
-          # MALLOC_ARENA_MAX 防 glibc 内存碎片膨胀（老 AOSP 编译常见坑）
+          export JACK_OPTIONAL_WARNINGED_ABOUT_UNSUPPORTED="true"
           export MALLOC_ARENA_MAX=4
-          export _JAVA_OPTIONS="-Xmx3g"
+
           # 清掉上一次可能残留的 jack server
           if [ -x prebuilts/sdk/tools/jack-admin ]; then
-            echo "===== 尝试停掉旧 Jack server ====="
+            echo "===== 停掉旧 Jack server ====="
             ./prebuilts/sdk/tools/jack-admin kill-server 2>&1 | tail -3 || true
             rm -rf "$HOME/.jack-server" "$HOME/.jack-settings" 2>/dev/null || true
             echo "  JACK_SERVER_VM_ARGUMENTS=$JACK_SERVER_VM_ARGUMENTS"
