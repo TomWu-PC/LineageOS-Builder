@@ -453,6 +453,30 @@ jobs:
           cd ~/lineage
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
+
+          # ★★★ 编译前属主自检（run #39 教训，见技能 5.6）★★★
+          #   run #39 编到 38% 报：
+          #     error: unable to open output file '...AsmWriter.o': 'Permission denied'
+          #   真因：out/ 下有 root 属主的中间目录（曾用 root 跑过 ninja 类命令），
+          #         而编译以 ghrunner 跑 → 撞权限。
+          #   这里做幂等保险：发现非本用户的文件就改回来。
+          MYUID=$(id -u); MYGID=$(id -g)
+          echo "===== 编译前属主自检（当前用户 uid=$MYUID gid=$MYGID）====="
+          if [ -d ~/lineage/out ]; then
+            BAD=$(find ~/lineage/out ! -user "$MYUID" 2>/dev/null | wc -l)
+            echo "  非本用户文件数 = $BAD"
+            if [ "$BAD" -gt 0 ]; then
+              echo "::warning::检测到 $BAD 个非本用户文件，自动修正属主"
+              sudo chown -R "$MYUID:$MYGID" ~/lineage/out 2>/dev/null || \
+                chown -R "$MYUID:$MYGID" ~/lineage/out 2>/dev/null || true
+              BAD2=$(find ~/lineage/out ! -user "$MYUID" 2>/dev/null | wc -l)
+              echo "  修正后剩余 = $BAD2"
+              [ "$BAD2" -gt 0 ] && echo "::warning::仍有 $BAD2 个无法修正，可能编译仍失败"
+            fi
+          else
+            echo "  out/ 尚不存在，跳过"
+          fi
+
           source build/envsetup.sh
           echo "===== 可用 lunch 目标 ====="
           lunch 2>&1 | tail -30 || true
