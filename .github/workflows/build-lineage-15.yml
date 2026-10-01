@@ -247,8 +247,12 @@ jobs:
           mkdir -p ~/lineage
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
+          # ★ repo 工具源码在 gerrit.googlesource.com —— 国内 runner 必失败。
+          #   统一指定清华镜像的 --repo-url，海外 runner 也可正常使用（更快）。
+          REPO_URL_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/git-repo"
           repo init -u https://github.com/LineageOS/android.git \
                     -b lineage-15.1 \
+                    --repo-url="$REPO_URL_MIRROR" \
                     --git-lfs \
                     --depth=1 \
                     --no-clone-bundle
