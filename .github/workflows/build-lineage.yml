@@ -293,12 +293,24 @@ jobs:
           cd ~/lineage
           export PATH="$HOME/bin:$PATH"
 
-          # ★★ 清掉可能残留的旧 .repo（上一轮失败留下的，URL 已被固化）★★
-          if [ -d .repo ]; then
-            echo "发现残留 .repo，清理（避免固化的旧 URL 影响重写）"
-            chmod -R u+w .repo 2>/dev/null || true
-            rm -rf .repo
+          # ★★★ run #38 诊断结论（实测）★★★
+          #   去掉 --depth=1 后，manifest 仓库已【不是浅克隆】，
+          #   HEAD 也正是要 checkout 的 88e3708275...，但【仍报同样的错】：
+          #     LineageOS/android checkout 88e370827501474db8f1905128fdea2e8128ead4
+          #     LineageOS/android_bootable_recovery checkout ac8c9e9662...   ← 随机仓库
+          #   → 说明根因不是浅克隆，而是【工作树与 .repo 状态不一致】：
+          #     上一轮失败留下的 2.1G 工作树（bootable/ frameworks/ 等）还在，
+          #     只删了 .repo，导致 checkout 时目录状态对不上。
+          #   → 修法：【整个 ~/lineage 清空重建】。
+          #     ⚠️ 代价：要重新 sync（国内镜像下约 20~30 分钟），但这是唯一干净的做法。
+          if [ -d ~/lineage ]; then
+            echo "===== 清空上一次的 ~/lineage（含工作树，避免 .repo/工作树不一致）====="
+            du -sh ~/lineage 2>/dev/null || true
+            chmod -R u+w ~/lineage 2>/dev/null || true
+            rm -rf ~/lineage
           fi
+          mkdir -p ~/lineage
+          cd ~/lineage
 
           # ★★★ 国内服务器（阿里云）关键修复（2026-10-01）★★★
           #   repo 工具自身的源码托管在 gerrit.googlesource.com，国内直连【必失败】：
@@ -310,13 +322,7 @@ jobs:
           #   repo sync 4 次全失败，报：
           #     Repo command failed due to the following `SyncFailFastError` errors:
           #     LineageOS/android checkout 88e370827501474db8f1905128fdea2e8128ead4
-          #   根因 = 上面 repo init 带了 --depth=1！
-          #     --depth=1 会把 manifest 仓库做成【浅克隆】，
-          #     而 repo sync 需要 fetch/checkout manifest 里指定的【具体 revision】，
-          #     浅克隆的 manifest 仓库提供不了 → checkout 必失败。
-          #   ★ 反证：15.1 线的 repo init【没有 --depth】，run #16 一次就 sync+编译成功。
-          #   → 结论：repo init 绝不要加 --depth=1。
-          #      manifest 仓库（LineageOS/android）完整 clone 也就 ~200 MB，可接受。
+          #   → 已去掉 repo init 的 --depth=1（浅克隆 manifest 仓库无法 fetch 指定 revision）
           REPO_URL_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/git-repo"
 
           echo "===== 探测 git-repo 镜像可达性 ====="
@@ -382,24 +388,27 @@ jobs:
           echo "=================================================="
 
           # 国内网络：降低并发、加大超时，失败自动重试
-          # ★ 去掉 --no-tags：manifest 检出指定 revision 时可能要 tag 信息
+          # ★ 用【最朴素】的参数：
+          #   去掉 --no-tags（manifest 检出可能要 tag）
+          #   去掉 --retry-fetches / --fail-fast（避免与 checkout 逻辑互相干扰）
           set +e
           RC=1
-          for i in 1 2 3 4; do
+          for i in 1 2 3; do
             echo "===== repo sync 第 $i 次尝试 ====="
-            repo sync -c -j4 --force-sync --no-clone-bundle --retry-fetches=5 --fail-fast
+            repo sync -c -j4 --force-sync --no-clone-bundle
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "::notice::✅ repo sync 成功"
               break
             fi
             echo "::warning::repo sync 失败（exit $RC），清理锁并重试..."
-            # ★ 诊断：打印 manifest 仓库状态，便于定位 checkout 类错误
             echo "----- 诊断：manifest 仓库 -----"
             ( cd .repo/manifests 2>/dev/null && \
               echo "  HEAD: $(git rev-parse HEAD 2>&1)" && \
-              echo "  是否浅克隆: $(git rev-parse --is-shallow-repository 2>&1)" && \
+              echo "  浅克隆: $(git rev-parse --is-shallow-repository 2>&1)" && \
               git log --oneline -2 2>&1 ) || echo "  .repo/manifests 不可读"
+            echo "----- 诊断：工作树与 .repo 时间戳 -----"
+            ls -ld .repo 2>/dev/null; ls -ld bootable frameworks system 2>/dev/null | head
             find .repo -name '*.lock' -delete 2>/dev/null || true
             sleep 20
           done
