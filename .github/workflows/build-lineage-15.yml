@@ -1,0 +1,315 @@
+name: Build LineageOS 15.1 for MS600
+
+# =============================================================================
+#  讯飞听见 L1（MS600）LineageOS 15.1（Android 8.1）云编译
+#
+#  ★ 为什么做 15.1？
+#    设备原厂 vendor 是 Android 8.1（API 27），而 18.1 是 Android 11，
+#    VNDK 跨 3 代 → 「自编 system + 原厂 vendor」对不上，且 18.1 编译
+#    磁盘需求 300GB+，免费 runner 装不下。
+#    15.1 与 vendor【版本完全一致】→ 兼容性最好，且体积小得多，
+#    有可能在 GitHub 免费 runner 上直接编完（零成本）。
+#
+#  与 18.1 workflow 的关键差异（不要照搬）：
+#    ✗ JDK：15.1 要【JDK 8】，不是 11（22.04 源里没有，需手动补）
+#    ✗ Python：15.1 要【Python 2.7】（22.04 源里没有，需手动补）
+#    ✗ 源码分支：lineage-15.1，不是 lineage-18.1
+#    ✓ 源码体积约 25GB（18.1 是 45GB），磁盘压力小很多
+#
+#  隔离说明：
+#    本文件位于独立的 lineage-15.1 分支，与 main 分支的 18.1 workflow
+#    通过 branch + concurrency(group 含 github.ref) 双重隔离，互不干扰。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: '编译目标（recoveryimage / bootimage / snod / systemimage / bacon）'
+        required: true
+        default: 'recoveryimage'
+        type: choice
+        options:
+          - recoveryimage
+          - bootimage
+          - snod
+          - systemimage
+          - bacon
+      jobs:
+        description: '并行编译任务数（内存吃紧就调小）'
+        required: true
+        default: '4'
+        type: string
+      sync_only:
+        description: '只同步源码不编译（验证 sync 可行性）'
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [ lineage-15.1 ]
+
+concurrency:
+  # ⚠️ group 里带 github.ref → 不同分支的运行【天然隔离】，不会互相顶掉。
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: LineageOS 15.1 / MS600
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+
+    steps:
+      # -----------------------------------------------------------------
+      - name: ① 检出本工程
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------
+      - name: ② 探测 Runner 规格
+        run: |
+          echo "================ CPU ================"
+          nproc
+          echo "================ 内存 ================"
+          free -h
+          echo "================ 磁盘（清理前）================"
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ③ 释放磁盘空间（★ 尽力清理）
+        run: |
+          echo "清理前："; df -h /
+          sudo rm -rf /usr/share/dotnet                || true
+          sudo rm -rf /usr/local/lib/android           || true
+          sudo rm -rf /opt/ghc                         || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL      || true
+          sudo rm -rf /usr/local/share/boost           || true
+          sudo rm -rf /usr/local/share/powershell      || true
+          sudo rm -rf /usr/share/swift                 || true
+          sudo rm -rf /usr/local/.ghcup                || true
+          sudo rm -rf /usr/local/lib/node_modules      || true
+          sudo rm -rf /opt/hostedtoolcache             || true
+          sudo rm -rf /usr/share/java                  || true
+          sudo rm -rf /usr/share/gradle                || true
+          sudo rm -rf /usr/local/share/chromium        || true
+          sudo rm -rf /usr/local/share/edge*           || true
+          sudo rm -rf /opt/microsoft                   || true
+          sudo rm -rf /usr/share/miniconda             || true
+          sudo rm -rf /usr/share/R                    || true
+          sudo rm -rf /opt/az                          || true
+          sudo rm -rf /usr/local/aws-cli               || true
+          sudo rm -rf /opt/google/chrome              || true
+          sudo rm -rf /usr/lib/firefox                 || true
+          sudo rm -rf /usr/share/doc                   || true
+          sudo rm -rf /usr/share/man                   || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /mnt/swapfile /swapfile 2>/dev/null || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*             || true
+          sudo docker image prune -a -f                || true
+          sudo docker system prune -a -f --volumes     || true
+          echo "清理后："; df -h /
+
+      # -----------------------------------------------------------------
+      # ★ 15.1 的头号难题：Ubuntu 22.04 官方源里【没有 JDK 8 和 Python 2.7】
+      #   解法：
+      #     JDK 8   → 用 Adoptium（Eclipse Temurin）官方 apt 源
+      #     Python2 → 用 deadsnakes PPA（最可靠的 python2.7 来源）
+      - name: ④ 安装 JDK 8（LineageOS 15.1 必需，★ 手动补源）
+        run: |
+          set -e
+          echo "===== 方案 A：Adoptium 官方源装 Temurin 8 ====="
+          sudo apt-get update -qq
+          sudo apt-get install -y wget apt-transport-https gpg
+          wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
+            | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
+          echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" \
+            | sudo tee /etc/apt/sources.list.d/adoptium.list
+          sudo apt-get update -qq
+          if sudo apt-get install -y temurin-8-jdk; then
+            echo "::notice::✅ Temurin 8 安装成功（方案 A）"
+          else
+            echo "::warning::Adoptium 源失败，改用方案 B：手动解压 tarball"
+            cd /opt
+            sudo wget -q https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u422-b05/OpenJDK8U-jdk_x64_linux_hotspot_8u422b05.tar.gz -O jdk8.tar.gz
+            sudo mkdir -p /opt/jdk8 && sudo tar xzf jdk8.tar.gz -C /opt/jdk8 --strip-components=1
+            echo "JAVA_HOME=/opt/jdk8" >> $GITHUB_ENV
+            echo "/opt/jdk8/bin" >> $GITHUB_PATH
+          fi
+          echo "===== 校验 ====="
+          java -version 2>&1 || true
+          javac -version 2>&1 || true
+
+      # -----------------------------------------------------------------
+      - name: ⑤ 安装 Python 2.7（LineageOS 15.1 必需，★ 手动补源）
+        run: |
+          set -e
+          echo "===== 方案 A：deadsnakes PPA ====="
+          sudo apt-get install -y software-properties-common
+          if sudo add-apt-repository -y ppa:deadsnakes/ppa && \
+             sudo apt-get update -qq && sudo apt-get install -y python2.7 python2; then
+            echo "::notice::✅ python2.7 安装成功（方案 A）"
+          else
+            echo "::warning::PPA 失败，改用方案 B：手动编译/解压"
+            # 退而求其次：用 Ubuntu 20.04 的 python2.7 deb 包
+            cd /tmp
+            wget -q http://archive.ubuntu.com/ubuntu/pool/main/p/python2.7/libpython2.7-minimal_2.7.18-1~20.04.1_amd64.deb || true
+            wget -q http://archive.ubuntu.com/ubuntu/pool/main/p/python2.7/python2.7-minimal_2.7.18-1~20.04.1_amd64.deb || true
+            sudo dpkg -i libpython2.7-minimal_*.deb python2.7-minimal_*.deb || true
+            sudo apt-get install -fy || true
+          fi
+          echo "===== 校验 ====="
+          python2 --version 2>&1 || python2.7 --version 2>&1 || echo "⚠️ python2 不可用"
+          # 建立 python 软链（15.1 的构建脚本调用的是 `python`）
+          if command -v python2 >/dev/null 2>&1; then
+            sudo ln -sf $(command -v python2) /usr/local/bin/python 2>/dev/null || true
+            echo "✅ 已建立 python -> python2 软链"
+          fi
+          python --version 2>&1 || true
+
+      # -----------------------------------------------------------------
+      - name: ⑥ 安装编译依赖（★ 含 15.1 专用旧包）
+        run: |
+          sudo apt-get update -qq
+          PKGS="bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+                git git-lfs gnupg gperf imagemagick lib32readline-dev lib32z1-dev \
+                libelf-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+                lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+                libncurses5-dev libncurses5 lib32ncurses5-dev libtinfo5 \
+                libwxgtk3.0-dev lib32stdc++6"
+          if ! sudo apt-get install -y $PKGS; then
+            echo "::warning::整批安装失败，改为逐个安装"
+            for p in $PKGS; do
+              sudo apt-get install -y "$p" || echo "::warning::跳过缺失包: $p"
+            done
+          fi
+          # 15.1 编译脚本常需要 `xxd`；libwxgtk3.0 在 22.04 已改名，装不上可忽略
+
+      # -----------------------------------------------------------------
+      - name: ⑦ 配置 git 与 repo 工具
+        run: |
+          git config --global user.name  "MS600 Builder"
+          git config --global user.email "builder@ms600.local"
+          git config --global color.ui    false
+          git config --global core.compression 0
+          mkdir -p ~/bin
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      # -----------------------------------------------------------------
+      - name: ⑧ 初始化源码仓库（LineageOS 15.1）
+        run: |
+          mkdir -p ~/lineage
+          cd ~/lineage
+          export PATH="$HOME/bin:$PATH"
+          repo init -u https://github.com/LineageOS/android.git \
+                    -b lineage-15.1 \
+                    --git-lfs \
+                    --depth=1 \
+                    --no-clone-bundle
+
+      # -----------------------------------------------------------------
+      - name: ⑨ 同步源码（★ 最耗时）
+        run: |
+          cd ~/lineage
+          export PATH="$HOME/bin:$PATH"
+          for i in 1 2 3; do
+            echo "===== repo sync 第 $i 次尝试 ====="
+            if repo sync -c -j8 --force-sync --no-clone-bundle --no-tags; then
+              echo "::notice::repo sync 成功"
+              break
+            fi
+            echo "::warning::repo sync 失败，重试中..."
+            sleep 15
+          done
+          echo "===== 源码体积 ====="
+          du -sh ~/lineage 2>/dev/null || true
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ⑩ 放入 MS600 设备树
+        run: |
+          cd ~/lineage
+          mkdir -p device/iflytek/MS600
+          cp -rv "$GITHUB_WORKSPACE/device/iflytek/MS600/." device/iflytek/MS600/
+          echo "===== 设备树内容 ====="
+          find device/iflytek/MS600 -type f | sort
+
+      # -----------------------------------------------------------------
+      - name: ⑪ 结束（sync_only 模式）
+        if: ${{ github.event.inputs.sync_only == 'true' }}
+        run: |
+          echo "::notice::sync_only 模式，跳过编译"
+          df -h /
+
+      # -----------------------------------------------------------------
+      - name: ⑫ 编译（lunch + mka，带磁盘心跳监控）
+        if: ${{ github.event.inputs.sync_only != 'true' }}
+        run: |
+          cd ~/lineage
+          export LC_ALL=C
+          export ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh
+          echo "===== 可用 lunch 目标 ====="
+          lunch 2>&1 | tail -30 || true
+          # ⚠️ 用 userdebug：eng 会让 build 系统往 cmdline 追加 buildvariant=eng
+          echo "===== 选择 lineage_MS600-userdebug ====="
+          lunch lineage_MS600-userdebug
+          BUILD_TARGET="${{ github.event.inputs.build_target || 'recoveryimage' }}"
+          BUILD_JOBS="${{ github.event.inputs.jobs || '4' }}"
+          # ---- ★ 省磁盘的关键设置 ----
+          export WITH_DEXPREOPT=false
+          export DONT_DEXPREOPT_PREBUILTS=true
+          export DISABLE_ARTIFACT_PATH_REQUIREMENTS=true
+          echo "===== 开始编译：mka ${BUILD_TARGET} -j${BUILD_JOBS} ====="
+          (
+            while true; do
+              sleep 300
+              AVAIL=$(df -m / | awk 'NR==2{print $4}')
+              PROG=$(grep -oE '\[ *[0-9]+% [0-9]+/[0-9]+\]' ~/lineage/build.log 2>/dev/null | tail -1)
+              OUTSZ=$(du -sm ~/lineage/out 2>/dev/null | cut -f1)
+              echo "- [$(date -u +%H:%M:%S)] 进度:$PROG | out:${OUTSZ}MB | 剩余磁盘:${AVAIL}MB" >> $GITHUB_STEP_SUMMARY
+              if [ "${AVAIL:-999999}" -lt 3072 ]; then
+                echo "::error::⚠️ 磁盘不足 3G！即将爆盘"
+              fi
+            done
+          ) &
+          HEARTBEAT_PID=$!
+          set -o pipefail
+          mka "${BUILD_TARGET}" -j"${BUILD_JOBS}" 2>&1 | tee ~/lineage/build.log
+          RC=${PIPESTATUS[0]}
+          kill $HEARTBEAT_PID 2>/dev/null || true
+          echo "===== 编译退出码: ${RC} ====="
+          du -sh ~/lineage/out 2>/dev/null || true
+          df -h /
+          exit $RC
+
+      # -----------------------------------------------------------------
+      - name: ⑬ 磁盘与产物概览
+        if: always()
+        run: |
+          echo "===== 磁盘 ====="; df -h /
+          echo "===== 产物 ====="
+          find ~/lineage/out/target/product -maxdepth 2 -type f \( -name '*.img' -o -name '*.zip' \) -exec ls -lh {} \; 2>/dev/null || echo "(无产物)"
+
+      # -----------------------------------------------------------------
+      - name: ⑭ 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-15.1
+          path: ~/lineage/build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # -----------------------------------------------------------------
+      - name: ⑮ 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-15.1-MS600-output
+          path: |
+            ~/lineage/out/target/product/MS600/*.img
+            ~/lineage/out/target/product/MS600/*.zip
+          if-no-files-found: warn
+          retention-days: 14
