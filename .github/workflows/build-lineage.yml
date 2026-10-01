@@ -306,6 +306,17 @@ jobs:
           #            Failed to connect to gerrit.googlesource.com port 443
           #   解法：--repo-url 指向【清华 TUNA git-repo 镜像】。
           #   ★ manifest 用【官方 + insteadOf 重写】最稳（清华 manifest 镜像可能不同步）。
+          # ★★★ run #37 真因（实测）★★★
+          #   repo sync 4 次全失败，报：
+          #     Repo command failed due to the following `SyncFailFastError` errors:
+          #     LineageOS/android checkout 88e370827501474db8f1905128fdea2e8128ead4
+          #   根因 = 上面 repo init 带了 --depth=1！
+          #     --depth=1 会把 manifest 仓库做成【浅克隆】，
+          #     而 repo sync 需要 fetch/checkout manifest 里指定的【具体 revision】，
+          #     浅克隆的 manifest 仓库提供不了 → checkout 必失败。
+          #   ★ 反证：15.1 线的 repo init【没有 --depth】，run #16 一次就 sync+编译成功。
+          #   → 结论：repo init 绝不要加 --depth=1。
+          #      manifest 仓库（LineageOS/android）完整 clone 也就 ~200 MB，可接受。
           REPO_URL_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/git/git-repo"
 
           echo "===== 探测 git-repo 镜像可达性 ====="
@@ -321,7 +332,7 @@ jobs:
           # ★ 单行写法（同上，YAML 里 "\" 不是续行符）
           for attempt in 1 2 3; do
             echo "===== repo init 第 ${attempt} 次 ====="
-            if repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --repo-url="$REPO_URL_MIRROR" --git-lfs --depth=1 --no-clone-bundle; then
+            if repo init -u https://github.com/LineageOS/android.git -b lineage-18.1 --repo-url="$REPO_URL_MIRROR" --git-lfs --no-clone-bundle; then
               echo "::notice::✅ repo init 成功"; break
             fi
             rm -rf .repo; sleep 10
@@ -371,17 +382,24 @@ jobs:
           echo "=================================================="
 
           # 国内网络：降低并发、加大超时，失败自动重试
+          # ★ 去掉 --no-tags：manifest 检出指定 revision 时可能要 tag 信息
           set +e
           RC=1
           for i in 1 2 3 4; do
             echo "===== repo sync 第 $i 次尝试 ====="
-            repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --retry-fetches=5 --fail-fast
+            repo sync -c -j4 --force-sync --no-clone-bundle --retry-fetches=5 --fail-fast
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "::notice::✅ repo sync 成功"
               break
             fi
             echo "::warning::repo sync 失败（exit $RC），清理锁并重试..."
+            # ★ 诊断：打印 manifest 仓库状态，便于定位 checkout 类错误
+            echo "----- 诊断：manifest 仓库 -----"
+            ( cd .repo/manifests 2>/dev/null && \
+              echo "  HEAD: $(git rev-parse HEAD 2>&1)" && \
+              echo "  是否浅克隆: $(git rev-parse --is-shallow-repository 2>&1)" && \
+              git log --oneline -2 2>&1 ) || echo "  .repo/manifests 不可读"
             find .repo -name '*.lock' -delete 2>/dev/null || true
             sleep 20
           done
