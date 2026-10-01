@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
+# MS600 产品定义 —— LineageOS 15.1（Android 8.1）
+#
 
 # 继承基础产品配置
 #   core_64_bit        → 64 位主 ABI（SDM450 是 arm64）
@@ -26,6 +28,7 @@ PRODUCT_MANUFACTURER := iFlytek
 PRODUCT_BOARD        := MS600
 
 # 覆盖 build.prop 中的部分字段，保持与设备真实身份一致
+# ⚠️ 15.1 编译出来的就是 8.1，与设备原厂版本一致 —— 这正是本路线的意义所在
 PRODUCT_BUILD_PROP_OVERRIDES += \
     PRODUCT_NAME=MS600 \
     TARGET_DEVICE=MS600 \
