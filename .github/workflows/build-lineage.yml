@@ -39,6 +39,14 @@ on:
         required: true
         default: false
         type: boolean
+      runner:
+        description: '运行器：github=免费云机器（146G磁盘，编不了systemimage）；self-hosted=自建云服务器（需先配好）'
+        required: true
+        default: 'github'
+        type: choice
+        options:
+          - github
+          - self-hosted
   push:
     branches: [ main, master ]
 
@@ -51,7 +59,13 @@ concurrency:
 jobs:
   build:
     name: LineageOS 18.1 / MS600
-    runs-on: ubuntu-22.04
+    # ⚠️ 动态运行器：push 事件时 inputs 为空 → 兜底 github。
+    #    写法说明：GitHub 表达式是【短路求值】，条件为假时不会求值 fromJSON，
+    #    因此 push 触发也安全。自建 runner 标签须与 setup_builder.sh 的 --labels 一致。
+    #    （等价于 github.event.inputs.runner == 'self-hosted' ? [self-hosted,...] : ubuntu-22.04）
+    runs-on: ${{ fromJSON(github.event.inputs.runner == 'self-hosted'
+             && '["self-hosted","linux","x64","builder"]'
+             || '"ubuntu-22.04"') }}
     timeout-minutes: 355
 
     steps:
@@ -71,11 +85,11 @@ jobs:
           df -h /
 
       # -----------------------------------------------------------------
-      # ⚠️ 磁盘是本项目【头号瓶颈】，实测数据：
-      #   sync 后源码 ~32G → 编到 50% 时 out/ 已吃掉 86G → 总 146G 撑爆
-      #   （2026-10-01 run 36758761289：50% 处 "No space left on device" 全线 FAILED）
-      #   所以这一步必须尽全力清，能多挤 20~25G 就是多得 10% 进度。
-      - name: ③ 释放磁盘空间（★ 尽力清理）
+      # ⚠️ 仅在 GitHub 免费 runner 上执行清理。
+      #    自建云服务器上这一步【必须跳过】——那里磁盘是自己买的 300G+，
+      #    而且预装的编译依赖（JDK/工具链）正是我们需要的，删了就白装了。
+      - name: ③ 释放磁盘空间（★ 尽力清理，仅免费 runner）
+        if: ${{ github.event.inputs.runner != 'self-hosted' }}
         run: |
           echo "清理前："; df -h /
           # --- GitHub runner 预装的大件（与 Android 编译无关）---
@@ -115,14 +129,16 @@ jobs:
           echo "::notice::③ 清理完成"
 
       # -----------------------------------------------------------------
-      - name: ④ 安装 JDK 11（Android 11 必需）
+      - name: ④ 安装 JDK 11（Android 11 必需；自建机器已预装则跳过）
+        if: ${{ github.event.inputs.runner != 'self-hosted' }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '11'
 
       # -----------------------------------------------------------------
-      - name: ⑤ 安装编译依赖
+      - name: ⑤ 安装编译依赖（自建机器已预装则跳过）
+        if: ${{ github.event.inputs.runner != 'self-hosted' }}
         run: |
           sudo apt-get update -qq
           PKGS="bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
@@ -271,13 +287,15 @@ jobs:
           find ~/lineage/out/target/product -maxdepth 2 -type f \( -name '*.img' -o -name '*.zip' \) -exec ls -lh {} \; 2>/dev/null || echo "(无产物)"
 
       # -----------------------------------------------------------------
+      # ⚠️ 路径用 $HOME 而非硬编码 /home/runner：
+      #    免费 runner 的 HOME=/home/runner，自建 runner 的 HOME=/home/ghrunner
       - name: ⑬ 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: |
-            /home/runner/lineage/build.log
+            ~/lineage/build.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -288,7 +306,7 @@ jobs:
         with:
           name: lineage-MS600-output
           path: |
-            /home/runner/lineage/out/target/product/MS600/*.img
-            /home/runner/lineage/out/target/product/MS600/*.zip
+            ~/lineage/out/target/product/MS600/*.img
+            ~/lineage/out/target/product/MS600/*.zip
           if-no-files-found: warn
           retention-days: 14
